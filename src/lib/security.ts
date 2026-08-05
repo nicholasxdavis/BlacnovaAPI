@@ -103,7 +103,10 @@ export function submissionLooksLikeSpam(input: {
   if (!Number.isFinite(started) || started <= 0) {
     return 'missing_timing'
   }
-  const elapsed = Date.now() - started
+  const now = Date.now()
+  // Allow small client/server clock skew (±60s)
+  if (started > now + 60_000) return 'stale'
+  const elapsed = now - started
   if (elapsed < 2500) return 'too_fast'
   if (elapsed > 1000 * 60 * 60 * 24) return 'stale'
 

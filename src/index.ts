@@ -576,10 +576,6 @@ async function createPublicSubmission(request: Request, env: Env): Promise<Respo
     return error('Forbidden', 403)
   }
 
-  // Browsers: 8/hour. Non-browser (no Origin): 3/hour.
-  const allowed = await rateLimit(env, `submit:${ip}`, browser ? 8 : 3, 60 * 60)
-  if (!allowed) return error('Too many submissions. Try again later.', 429)
-
   let body: {
     domain?: string
     name?: string
@@ -592,6 +588,7 @@ async function createPublicSubmission(request: Request, env: Env): Promise<Respo
     company_url?: string
     _gotcha?: string
     _t?: number | string
+    formStarted?: number | string
   }
   try {
     body = (await request.json()) as typeof body
@@ -617,7 +614,7 @@ async function createPublicSubmission(request: Request, env: Env): Promise<Respo
     honeypot: body._gotcha,
     websiteField: body.website,
     companyUrl: body.company_url,
-    startedAt: body._t,
+    startedAt: body.formStarted ?? body._t,
     message,
     name,
   })
@@ -628,6 +625,10 @@ async function createPublicSubmission(request: Request, env: Env): Promise<Respo
     }
     return error('Unable to submit right now. Please try again.', 400)
   }
+
+  // Rate-limit only after spam filters so bots don't burn the quota
+  const allowed = await rateLimit(env, `submit:${ip}`, browser ? 8 : 3, 60 * 60)
+  if (!allowed) return error('Too many submissions. Try again later.', 429)
 
   const website = await env.DB.prepare(`SELECT id FROM websites WHERE domain = ?`)
     .bind(domain)
