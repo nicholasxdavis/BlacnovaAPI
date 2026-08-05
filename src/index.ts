@@ -392,7 +392,7 @@ async function handle(request: Request, env: Env): Promise<Response> {
     const ticketId = id('ticket')
     const message = body.message.trim()
     await env.DB.prepare(
-      `INSERT INTO support_tickets (id, user_id, website_id, topic, message) VALUES (?, ?, ?, ?, ?)`,
+      `INSERT INTO support_tickets (id, user_id, website_id, topic, message, status) VALUES (?, ?, ?, ?, ?, 'new')`,
     )
       .bind(ticketId, user.id, websiteId, body.topic, message)
       .run()

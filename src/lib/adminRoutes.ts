@@ -699,5 +699,78 @@ export async function handleAdmin(
     return json({ ok: true })
   }
 
+  // --- Dashboard support tickets (all client portals) ---
+  if (path === '/v1/admin/support' && method === 'GET') {
+    const { results } = await env.DB.prepare(
+      `SELECT t.id, t.topic, t.message, t.status, t.notes, t.created_at,
+              t.user_id, t.website_id,
+              u.name AS user_name, u.email AS user_email,
+              w.name AS website_name, w.domain AS website_domain
+       FROM support_tickets t
+       LEFT JOIN users u ON u.id = t.user_id
+       LEFT JOIN websites w ON w.id = t.website_id
+       ORDER BY t.created_at DESC`,
+    ).all<{
+      id: string
+      topic: string
+      message: string
+      status: string | null
+      notes: string | null
+      created_at: string
+      user_id: string
+      website_id: string
+      user_name: string | null
+      user_email: string | null
+      website_name: string | null
+      website_domain: string | null
+    }>()
+
+    return json({
+      tickets: (results || []).map((t) => ({
+        id: t.id,
+        topic: t.topic,
+        message: t.message,
+        status: t.status || 'new',
+        notes: t.notes || '',
+        createdAt: t.created_at,
+        userId: t.user_id,
+        userName: t.user_name || 'Unknown',
+        userEmail: t.user_email || '',
+        websiteId: t.website_id,
+        websiteName: t.website_name || '—',
+        websiteDomain: t.website_domain || '',
+      })),
+    })
+  }
+
+  if (path.startsWith('/v1/admin/support/') && method === 'PATCH') {
+    const ticketId = path.slice('/v1/admin/support/'.length)
+    if (!ticketId || ticketId.includes('/')) return error('Not found', 404)
+    const body = (await request.json()) as { status?: string; notes?: string }
+    const allowed = new Set(['new', 'read', 'in_progress', 'resolved', 'archived'])
+    if (body.status !== undefined && !allowed.has(body.status)) {
+      return error('Invalid status')
+    }
+    const existing = await env.DB.prepare(`SELECT id FROM support_tickets WHERE id = ?`)
+      .bind(ticketId)
+      .first()
+    if (!existing) return error('Ticket not found', 404)
+
+    await env.DB.prepare(
+      `UPDATE support_tickets SET
+        status = COALESCE(?, status),
+        notes = COALESCE(?, notes)
+       WHERE id = ?`,
+    )
+      .bind(
+        body.status !== undefined ? body.status : null,
+        body.notes !== undefined ? clampString(body.notes, 4000) : null,
+        ticketId,
+      )
+      .run()
+
+    return json({ ok: true })
+  }
+
   return error('Not found', 404)
 }

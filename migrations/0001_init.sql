@@ -103,6 +103,8 @@ CREATE TABLE IF NOT EXISTS support_tickets (
   website_id TEXT NOT NULL,
   topic TEXT NOT NULL,
   message TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'new',
+  notes TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
