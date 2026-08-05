@@ -229,10 +229,8 @@ export async function ensureOpeningBalance(env: Env, amountCents = 850): Promise
   ).first()
   if (existing) return
 
-  const hasLive = await env.DB.prepare(
-    `SELECT id FROM bmc_entries WHERE kind != 'opening' LIMIT 1`,
-  ).first()
-  if (hasLive) return
+  const any = await env.DB.prepare(`SELECT id FROM bmc_entries LIMIT 1`).first()
+  if (any) return
 
   await env.DB.prepare(
     `INSERT INTO bmc_entries
