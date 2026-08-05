@@ -21,4 +21,4 @@ export const DEFAULT_CLIENT_MODULES = [
   'settings',
 ] as const
 
-export const PLATFORM_MODULES = ['clients', 'accounts', 'billing'] as const
+export const PLATFORM_MODULES = ['clients', 'accounts', 'billing', 'invoices'] as const

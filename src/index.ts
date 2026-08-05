@@ -15,6 +15,7 @@ import { publishMediaToGitHub, publishWebsiteContent } from './lib/publish'
 import { clampString, clientIp, isValidEmail, rateLimit } from './lib/security'
 import { createSession, destroySession, getSessionUser } from './lib/session'
 import { handleAdmin } from './lib/adminRoutes'
+import { processDueRecurringInvoices } from './lib/invoices'
 import type { Env } from './lib/types'
 
 export default {
@@ -41,6 +42,23 @@ export default {
       }
       return error('Internal server error', 500, cors)
     }
+  },
+
+  async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
+    ctx.waitUntil(
+      processDueRecurringInvoices(env)
+        .then((result) => {
+          console.log(JSON.stringify({ cron: 'recurring_invoices', ...result }))
+        })
+        .catch((err) => {
+          console.error(
+            JSON.stringify({
+              cron: 'recurring_invoices',
+              err: String(err),
+            }),
+          )
+        }),
+    )
   },
 }
 

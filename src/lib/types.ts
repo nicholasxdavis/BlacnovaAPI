@@ -10,6 +10,10 @@ export interface Env {
   GITHUB_BRANCH?: string
   STRIPE_SECRET_KEY: string
   STRIPE_PUBLISHABLE_KEY?: string
+  /** Brevo transactional API key — `wrangler secret put BREVO_API_KEY` */
+  BREVO_API_KEY: string
+  BREVO_SENDER_EMAIL?: string
+  BREVO_SENDER_NAME?: string
 }
 
 export type ModuleKey =

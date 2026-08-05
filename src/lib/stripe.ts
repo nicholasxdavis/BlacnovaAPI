@@ -1,6 +1,7 @@
 import type { Env } from './types'
 
 const STRIPE_API = 'https://api.stripe.com/v1'
+const STRIPE_VERSION = '2024-11-20.acacia'
 
 function requireStripeKey(env: Env): string {
   if (!env.STRIPE_SECRET_KEY) {
@@ -9,14 +10,30 @@ function requireStripeKey(env: Env): string {
   return env.STRIPE_SECRET_KEY
 }
 
-async function stripeGet(env: Env, path: string): Promise<unknown> {
+async function stripeRequest(
+  env: Env,
+  method: 'GET' | 'POST',
+  path: string,
+  form?: Record<string, string | number | undefined>,
+): Promise<unknown> {
   const key = requireStripeKey(env)
-  const res = await fetch(`${STRIPE_API}${path}`, {
-    headers: {
-      Authorization: `Bearer ${key}`,
-      'Stripe-Version': '2024-11-20.acacia',
-    },
-  })
+  const headers: Record<string, string> = {
+    Authorization: `Bearer ${key}`,
+    'Stripe-Version': STRIPE_VERSION,
+  }
+
+  let body: string | undefined
+  if (method === 'POST' && form) {
+    headers['Content-Type'] = 'application/x-www-form-urlencoded'
+    const params = new URLSearchParams()
+    for (const [k, v] of Object.entries(form)) {
+      if (v === undefined || v === '') continue
+      params.set(k, String(v))
+    }
+    body = params.toString()
+  }
+
+  const res = await fetch(`${STRIPE_API}${path}`, { method, headers, body })
   const data = (await res.json()) as { error?: { message?: string } }
   if (!res.ok) {
     throw new Error(data.error?.message || `Stripe request failed (${res.status})`)
@@ -24,7 +41,11 @@ async function stripeGet(env: Env, path: string): Promise<unknown> {
   return data
 }
 
-function centsToUsd(amount: number, currency: string): string {
+async function stripeGet(env: Env, path: string): Promise<unknown> {
+  return stripeRequest(env, 'GET', path)
+}
+
+export function centsToUsd(amount: number, currency: string): string {
   const value = (amount / 100).toFixed(2)
   return `${currency.toUpperCase()} ${value}`
 }
@@ -66,10 +87,18 @@ export async function getBillingOverview(env: Env) {
   return {
     balance: {
       available: available
-        ? { amount: available.amount, currency: available.currency, formatted: centsToUsd(available.amount, available.currency) }
+        ? {
+            amount: available.amount,
+            currency: available.currency,
+            formatted: centsToUsd(available.amount, available.currency),
+          }
         : { amount: 0, currency: 'usd', formatted: 'USD 0.00' },
       pending: pending
-        ? { amount: pending.amount, currency: pending.currency, formatted: centsToUsd(pending.amount, pending.currency) }
+        ? {
+            amount: pending.amount,
+            currency: pending.currency,
+            formatted: centsToUsd(pending.amount, pending.currency),
+          }
         : { amount: 0, currency: 'usd', formatted: 'USD 0.00' },
     },
     charges: (chargesRaw.data || []).map((c) => ({
@@ -92,5 +121,100 @@ export async function getBillingOverview(env: Env) {
       arrivalDate: new Date(p.arrival_date * 1000).toISOString().slice(0, 10),
       createdAt: new Date(p.created * 1000).toISOString(),
     })),
+  }
+}
+
+async function findOrCreateCustomer(
+  env: Env,
+  email: string,
+  name: string,
+): Promise<{ id: string }> {
+  const search = (await stripeGet(
+    env,
+    `/customers?email=${encodeURIComponent(email)}&limit=1`,
+  )) as { data: Array<{ id: string }> }
+
+  if (search.data?.[0]?.id) {
+    return { id: search.data[0].id }
+  }
+
+  return (await stripeRequest(env, 'POST', '/customers', {
+    email,
+    name,
+    'metadata[source]': 'blacnova_dashboard',
+  })) as { id: string }
+}
+
+export async function createAndFinalizeInvoice(
+  env: Env,
+  opts: {
+    email: string
+    name: string
+    amountCents: number
+    currency: string
+    description: string
+    daysUntilDue: number
+    metadata?: Record<string, string>
+  },
+): Promise<{
+  invoiceId: string
+  customerId: string
+  status: string
+  hostedInvoiceUrl: string
+  invoicePdf: string | null
+}> {
+  if (opts.amountCents < 50) {
+    throw new Error('Amount must be at least $0.50')
+  }
+
+  const customer = await findOrCreateCustomer(env, opts.email, opts.name)
+
+  const invoiceForm: Record<string, string | number | undefined> = {
+    customer: customer.id,
+    collection_method: 'send_invoice',
+    days_until_due: opts.daysUntilDue,
+    auto_advance: 'false',
+    description: opts.description,
+  }
+  if (opts.metadata) {
+    for (const [k, v] of Object.entries(opts.metadata)) {
+      if (v) invoiceForm[`metadata[${k}]`] = v
+    }
+  }
+
+  const invoice = (await stripeRequest(env, 'POST', '/invoices', invoiceForm)) as {
+    id: string
+  }
+
+  await stripeRequest(env, 'POST', '/invoiceitems', {
+    customer: customer.id,
+    invoice: invoice.id,
+    amount: opts.amountCents,
+    currency: opts.currency,
+    description: opts.description,
+  })
+
+  const finalized = (await stripeRequest(
+    env,
+    'POST',
+    `/invoices/${invoice.id}/finalize`,
+    { auto_advance: 'false' },
+  )) as {
+    id: string
+    status: string
+    hosted_invoice_url: string | null
+    invoice_pdf: string | null
+  }
+
+  if (!finalized.hosted_invoice_url) {
+    throw new Error('Stripe did not return a hosted invoice URL')
+  }
+
+  return {
+    invoiceId: finalized.id,
+    customerId: customer.id,
+    status: finalized.status,
+    hostedInvoiceUrl: finalized.hosted_invoice_url,
+    invoicePdf: finalized.invoice_pdf,
   }
 }

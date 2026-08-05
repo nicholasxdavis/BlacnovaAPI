@@ -1,6 +1,7 @@
 import { hashPassword } from './auth'
 import { DEFAULT_CLIENT_MODULES, isPlatformUser } from './admin'
 import { error, id, json, nowIso, today } from './http'
+import { createAndSendInvoice, listInvoices } from './invoices'
 import { clampString, isValidEmail } from './security'
 import { revokeUserSessions } from './session'
 import { getBillingOverview } from './stripe'
@@ -371,6 +372,296 @@ export async function handleAdmin(
     } catch (err) {
       return error(err instanceof Error ? err.message : 'Stripe billing unavailable', 502)
     }
+  }
+
+  // --- Invoices (Stripe + Brevo) ---
+  if (path === '/v1/admin/invoices' && method === 'GET') {
+    const invoices = await listInvoices(env)
+    return json({ invoices })
+  }
+
+  if (path === '/v1/admin/invoices' && method === 'POST') {
+    const body = (await request.json()) as {
+      email?: string
+      name?: string
+      amount?: number | string
+      description?: string
+      daysUntilDue?: number
+      websiteId?: string
+      sendNow?: boolean
+    }
+    const email = clampString(body.email, 254).toLowerCase()
+    const name = clampString(body.name, 120)
+    const description = clampString(body.description, 500)
+    const amountDollars = Number(body.amount)
+    const daysUntilDue = body.daysUntilDue === undefined ? 14 : Number(body.daysUntilDue)
+
+    if (!email || !name || !description) {
+      return error('email, name, and description are required')
+    }
+    if (!isValidEmail(email)) return error('A valid email is required')
+    if (!Number.isFinite(amountDollars) || amountDollars < 0.5) {
+      return error('Amount must be at least 0.50')
+    }
+    if (!Number.isFinite(daysUntilDue) || daysUntilDue < 1 || daysUntilDue > 90) {
+      return error('daysUntilDue must be between 1 and 90')
+    }
+
+    let websiteId: string | null = body.websiteId ? clampString(body.websiteId, 64) : null
+    if (websiteId) {
+      const website = await env.DB.prepare(`SELECT id FROM websites WHERE id = ?`)
+        .bind(websiteId)
+        .first()
+      if (!website) return error('Website not found', 404)
+    }
+
+    try {
+      const invoice = await createAndSendInvoice(env, {
+        customerEmail: email,
+        customerName: name,
+        amountCents: Math.round(amountDollars * 100),
+        description,
+        daysUntilDue,
+        websiteId,
+      })
+      return json({ invoice }, 201)
+    } catch (err) {
+      return error(err instanceof Error ? err.message : 'Could not send invoice', 502)
+    }
+  }
+
+  if (path === '/v1/admin/recurring-invoices' && method === 'GET') {
+    const { results } = await env.DB.prepare(
+      `SELECT r.*, w.name AS website_name, w.domain AS website_domain
+       FROM recurring_invoices r
+       LEFT JOIN websites w ON w.id = r.website_id
+       ORDER BY r.created_at DESC`,
+    ).all<{
+      id: string
+      website_id: string | null
+      customer_email: string
+      customer_name: string
+      amount_cents: number
+      currency: string
+      description: string
+      day_of_month: number
+      days_until_due: number
+      active: number
+      last_sent_on: string | null
+      created_at: string
+      updated_at: string
+      website_name: string | null
+      website_domain: string | null
+    }>()
+
+    return json({
+      recurring: (results || []).map((r) => ({
+        id: r.id,
+        websiteId: r.website_id,
+        websiteName: r.website_name,
+        websiteDomain: r.website_domain,
+        customerEmail: r.customer_email,
+        customerName: r.customer_name,
+        amountCents: r.amount_cents,
+        currency: r.currency,
+        formatted: `USD ${(r.amount_cents / 100).toFixed(2)}`,
+        description: r.description,
+        dayOfMonth: r.day_of_month,
+        daysUntilDue: r.days_until_due,
+        active: Boolean(r.active),
+        lastSentOn: r.last_sent_on,
+        createdAt: r.created_at,
+        updatedAt: r.updated_at,
+      })),
+    })
+  }
+
+  if (path === '/v1/admin/recurring-invoices' && method === 'POST') {
+    const body = (await request.json()) as {
+      email?: string
+      name?: string
+      amount?: number | string
+      description?: string
+      dayOfMonth?: number
+      daysUntilDue?: number
+      websiteId?: string
+      active?: boolean
+    }
+    const email = clampString(body.email, 254).toLowerCase()
+    const name = clampString(body.name, 120)
+    const description = clampString(body.description, 500)
+    const amountDollars = Number(body.amount)
+    const dayOfMonth = Number(body.dayOfMonth)
+    const daysUntilDue = body.daysUntilDue === undefined ? 14 : Number(body.daysUntilDue)
+
+    if (!email || !name || !description) {
+      return error('email, name, and description are required')
+    }
+    if (!isValidEmail(email)) return error('A valid email is required')
+    if (!Number.isFinite(amountDollars) || amountDollars < 0.5) {
+      return error('Amount must be at least 0.50')
+    }
+    if (!Number.isInteger(dayOfMonth) || dayOfMonth < 1 || dayOfMonth > 28) {
+      return error('dayOfMonth must be between 1 and 28')
+    }
+    if (!Number.isFinite(daysUntilDue) || daysUntilDue < 1 || daysUntilDue > 90) {
+      return error('daysUntilDue must be between 1 and 90')
+    }
+
+    let websiteId: string | null = body.websiteId ? clampString(body.websiteId, 64) : null
+    if (websiteId) {
+      const website = await env.DB.prepare(`SELECT id FROM websites WHERE id = ?`)
+        .bind(websiteId)
+        .first()
+      if (!website) return error('Website not found', 404)
+    }
+
+    const recurringId = id('recur')
+    await env.DB.prepare(
+      `INSERT INTO recurring_invoices
+        (id, website_id, customer_email, customer_name, amount_cents, currency, description,
+         day_of_month, days_until_due, active)
+       VALUES (?, ?, ?, ?, ?, 'usd', ?, ?, ?, ?)`,
+    )
+      .bind(
+        recurringId,
+        websiteId,
+        email,
+        name,
+        Math.round(amountDollars * 100),
+        description,
+        dayOfMonth,
+        daysUntilDue,
+        body.active === false ? 0 : 1,
+      )
+      .run()
+
+    return json(
+      {
+        id: recurringId,
+        email,
+        name,
+        amount: amountDollars,
+        dayOfMonth,
+        websiteId,
+      },
+      201,
+    )
+  }
+
+  if (path.startsWith('/v1/admin/recurring-invoices/') && method === 'PATCH') {
+    const recurringId = path.slice('/v1/admin/recurring-invoices/'.length)
+    if (recurringId.includes('/')) return error('Not found', 404)
+    const body = (await request.json()) as {
+      active?: boolean
+      amount?: number | string
+      description?: string
+      dayOfMonth?: number
+      daysUntilDue?: number
+      name?: string
+      email?: string
+      websiteId?: string | null
+    }
+
+    const existing = await env.DB.prepare(`SELECT id FROM recurring_invoices WHERE id = ?`)
+      .bind(recurringId)
+      .first()
+    if (!existing) return error('Recurring invoice not found', 404)
+
+    if (body.dayOfMonth !== undefined) {
+      const day = Number(body.dayOfMonth)
+      if (!Number.isInteger(day) || day < 1 || day > 28) {
+        return error('dayOfMonth must be between 1 and 28')
+      }
+    }
+    if (body.email !== undefined && !isValidEmail(clampString(body.email, 254))) {
+      return error('A valid email is required')
+    }
+    if (body.amount !== undefined) {
+      const amountDollars = Number(body.amount)
+      if (!Number.isFinite(amountDollars) || amountDollars < 0.5) {
+        return error('Amount must be at least 0.50')
+      }
+    }
+
+    await env.DB.prepare(
+      `UPDATE recurring_invoices SET
+        active = COALESCE(?, active),
+        amount_cents = COALESCE(?, amount_cents),
+        description = COALESCE(?, description),
+        day_of_month = COALESCE(?, day_of_month),
+        days_until_due = COALESCE(?, days_until_due),
+        customer_name = COALESCE(?, customer_name),
+        customer_email = COALESCE(?, customer_email),
+        website_id = CASE WHEN ? = 1 THEN ? ELSE website_id END,
+        updated_at = ?
+       WHERE id = ?`,
+    )
+      .bind(
+        body.active === undefined ? null : body.active ? 1 : 0,
+        body.amount !== undefined ? Math.round(Number(body.amount) * 100) : null,
+        body.description !== undefined ? clampString(body.description, 500) : null,
+        body.dayOfMonth !== undefined ? Number(body.dayOfMonth) : null,
+        body.daysUntilDue !== undefined ? Number(body.daysUntilDue) : null,
+        body.name !== undefined ? clampString(body.name, 120) : null,
+        body.email !== undefined ? clampString(body.email, 254).toLowerCase() : null,
+        body.websiteId !== undefined ? 1 : 0,
+        body.websiteId !== undefined ? body.websiteId || null : null,
+        nowIso(),
+        recurringId,
+      )
+      .run()
+
+    return json({ ok: true })
+  }
+
+  if (path.match(/^\/v1\/admin\/recurring-invoices\/[^/]+\/run$/) && method === 'POST') {
+    const recurringId = path.split('/')[4]
+    const row = await env.DB.prepare(`SELECT * FROM recurring_invoices WHERE id = ?`)
+      .bind(recurringId)
+      .first<{
+        id: string
+        website_id: string | null
+        customer_email: string
+        customer_name: string
+        amount_cents: number
+        currency: string
+        description: string
+        days_until_due: number
+      }>()
+    if (!row) return error('Recurring invoice not found', 404)
+
+    try {
+      const invoice = await createAndSendInvoice(env, {
+        customerEmail: row.customer_email,
+        customerName: row.customer_name,
+        amountCents: row.amount_cents,
+        currency: row.currency,
+        description: row.description,
+        daysUntilDue: row.days_until_due,
+        websiteId: row.website_id,
+        recurringId: row.id,
+      })
+      await env.DB.prepare(
+        `UPDATE recurring_invoices SET last_sent_on = ?, updated_at = ? WHERE id = ?`,
+      )
+        .bind(today(), nowIso(), recurringId)
+        .run()
+      return json({ invoice })
+    } catch (err) {
+      return error(err instanceof Error ? err.message : 'Could not send invoice', 502)
+    }
+  }
+
+  if (path.startsWith('/v1/admin/recurring-invoices/') && method === 'DELETE') {
+    const recurringId = path.slice('/v1/admin/recurring-invoices/'.length)
+    if (recurringId.includes('/')) return error('Not found', 404)
+    const existing = await env.DB.prepare(`SELECT id FROM recurring_invoices WHERE id = ?`)
+      .bind(recurringId)
+      .first()
+    if (!existing) return error('Recurring invoice not found', 404)
+    await env.DB.prepare(`DELETE FROM recurring_invoices WHERE id = ?`).bind(recurringId).run()
+    return json({ ok: true })
   }
 
   return error('Not found', 404)
