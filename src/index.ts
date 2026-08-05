@@ -12,7 +12,7 @@ import {
 import { GitHubError } from './lib/github'
 import { corsHeaders, error, formatBytes, id, json, nowIso, today } from './lib/http'
 import { publishMediaToGitHub, publishWebsiteContent } from './lib/publish'
-import { clampString, clientIp, isValidEmail, rateLimit } from './lib/security'
+import { clampString, clientIp, hasBrowserOrigin, isAllowedFormOrigin, isDisposableEmail, isValidEmail, rateLimit, submissionLooksLikeSpam } from './lib/security'
 import { createSession, destroySession, getSessionUser } from './lib/session'
 import { handleAdmin } from './lib/adminRoutes'
 import { ingestBmcWebhook, verifyBmcSignature } from './lib/bmc'
@@ -570,7 +570,14 @@ async function collectAnalytics(request: Request, env: Env): Promise<Response> {
 
 async function createPublicSubmission(request: Request, env: Env): Promise<Response> {
   const ip = clientIp(request)
-  const allowed = await rateLimit(env, `submit:${ip}`, 20, 60 * 60)
+  const browser = hasBrowserOrigin(request)
+
+  if (browser && !isAllowedFormOrigin(request, env)) {
+    return error('Forbidden', 403)
+  }
+
+  // Browsers: 8/hour. Non-browser (no Origin): 3/hour.
+  const allowed = await rateLimit(env, `submit:${ip}`, browser ? 8 : 3, 60 * 60)
   if (!allowed) return error('Too many submissions. Try again later.', 429)
 
   let body: {
@@ -581,6 +588,10 @@ async function createPublicSubmission(request: Request, env: Env): Promise<Respo
     subject?: string
     message?: string
     source?: string
+    website?: string
+    company_url?: string
+    _gotcha?: string
+    _t?: number | string
   }
   try {
     body = (await request.json()) as typeof body
@@ -600,11 +611,41 @@ async function createPublicSubmission(request: Request, env: Env): Promise<Respo
     return error('domain, name, email, and message are required')
   }
   if (!isValidEmail(email)) return error('A valid email is required')
+  if (isDisposableEmail(email)) return error('Please use a permanent email address')
+
+  const spamReason = submissionLooksLikeSpam({
+    honeypot: body._gotcha,
+    websiteField: body.website,
+    companyUrl: body.company_url,
+    startedAt: body._t,
+    message,
+    name,
+  })
+  if (spamReason) {
+    // Silent success for honeypot fills so bots think it worked
+    if (spamReason === 'rejected') {
+      return json({ ok: true, id: id('sub') }, 201)
+    }
+    return error('Unable to submit right now. Please try again.', 400)
+  }
 
   const website = await env.DB.prepare(`SELECT id FROM websites WHERE domain = ?`)
     .bind(domain)
     .first<{ id: string }>()
   if (!website) return error('Website not found', 404)
+
+  // Soft duplicate guard: same email + identical message within 10 minutes
+  const recent = await env.DB.prepare(
+    `SELECT id FROM submissions
+     WHERE website_id = ? AND email = ? AND message = ?
+       AND created_at >= datetime('now', '-10 minutes')
+     LIMIT 1`,
+  )
+    .bind(website.id, email, message)
+    .first()
+  if (recent) {
+    return json({ ok: true, id: (recent as { id: string }).id }, 200)
+  }
 
   const submissionId = id('sub')
   await env.DB.prepare(
