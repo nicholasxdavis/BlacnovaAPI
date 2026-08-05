@@ -5,3 +5,5 @@ dist
 worker-configuration.d.ts
 
 migrations/0002_seed.sql
+
+migrations/0002_seed.sql
