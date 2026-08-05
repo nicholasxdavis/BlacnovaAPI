@@ -1,0 +1,31 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "blacnova-api",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-05",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "blacnova-db",
+      "database_id": "668db73a-ca7b-4c4f-b75b-13b2bbd8c8de"
+    }
+  ],
+  "kv_namespaces": [
+    {
+      "binding": "MEDIA",
+      "id": "5ed64630f57c4d63b365dc7b57b463df"
+    },
+    {
+      "binding": "SESSIONS",
+      "id": "5e6c2b6111e048a591762cdbb06eab8f"
+    }
+  ],
+  "vars": {
+    "CORS_ORIGINS": "https://dashboard.blacnova.net,http://localhost:5173,http://127.0.0.1:5173,https://www.blacnova.net,https://blacnova.net"
+  }
+}
