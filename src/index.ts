@@ -542,11 +542,18 @@ async function publicRoutes(request: Request, env: Env, path: string): Promise<R
         message: string
         expected_return: string
       }>()
-    const { results } = await env.DB.prepare(
-      `SELECT * FROM content_blocks WHERE website_id = ? AND published = 1 ORDER BY sort_order`,
-    )
-      .bind(website.id)
-      .all()
+    const [{ results: contentRows }, { results: mediaRows }] = await Promise.all([
+      env.DB.prepare(
+        `SELECT * FROM content_blocks WHERE website_id = ? AND published = 1 ORDER BY sort_order`,
+      )
+        .bind(website.id)
+        .all(),
+      env.DB.prepare(
+        `SELECT id, name, type, url FROM media_items WHERE website_id = ? ORDER BY name COLLATE NOCASE`,
+      )
+        .bind(website.id)
+        .all<{ id: string; name: string; type: string; url: string | null }>(),
+    ])
     return json({
       website: {
         id: website.id,
@@ -562,7 +569,13 @@ async function publicRoutes(request: Request, env: Env, path: string): Promise<R
             expectedReturn: maintenance.expected_return,
           }
         : null,
-      content: (results || []).map((r) => mapContent(r as never)),
+      content: (contentRows || []).map((r) => mapContent(r as never)),
+      media: (mediaRows || []).map((m) => ({
+        id: m.id,
+        name: m.name,
+        type: m.type,
+        url: m.url || null,
+      })),
     })
   }
 

@@ -41,9 +41,28 @@ async function seedWebsiteDefaults(env: Env, websiteId: string, name: string) {
   await env.DB.prepare(
     `INSERT INTO content_blocks
       (id, website_id, page_id, page_name, section, label, type, value, published, sort_order)
-     VALUES (?, ?, 'home', 'Home', 'Hero', 'Headline', 'heading', ?, 1, 1)`,
+     VALUES
+      (?, ?, 'home', 'Home', 'Hero', 'Headline', 'heading', ?, 1, 1),
+      (?, ?, 'home', 'Home', 'Hero', 'Supporting text', 'textarea', ?, 1, 2),
+      (?, ?, 'home', 'Home', 'Services', 'Section title', 'heading', 'Services', 1, 3)`,
   )
-    .bind(id('c'), websiteId, `Welcome to ${name}`)
+    .bind(
+      id('c'),
+      websiteId,
+      `Welcome to ${name}`,
+      id('c'),
+      websiteId,
+      `Edit your homepage copy from the Content tab in the Blacnova client portal.`,
+      id('c'),
+      websiteId,
+    )
+    .run()
+
+  await env.DB.prepare(
+    `INSERT INTO media_items (id, website_id, name, type, size, used_on, updated_at, url)
+     VALUES (?, ?, 'placeholder.png', 'image', '—', 'Home · Hero', ?, NULL)`,
+  )
+    .bind(id('m'), websiteId, today())
     .run()
 }
 
