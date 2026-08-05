@@ -16,8 +16,7 @@ import { clampString, clientIp, hasBrowserOrigin, isAllowedFormOrigin, isDisposa
 import { createSession, destroySession, getSessionUser } from './lib/session'
 import { handleAdmin } from './lib/adminRoutes'
 import { ingestBmcWebhook, verifyBmcSignature } from './lib/bmc'
-import { processDueRecurringInvoices } from './lib/invoices'
-import type { Env } from './lib/types'
+import { sendBrevoEmail } from './lib/brevo'
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -367,20 +366,17 @@ async function handle(request: Request, env: Env): Promise<Response> {
     const body = (await request.json()) as {
       submissions?: boolean
       maintenance?: boolean
-      weeklyEmail?: boolean
     }
     await env.DB.prepare(
       `UPDATE users SET
         notify_submissions = COALESCE(?, notify_submissions),
         notify_maintenance = COALESCE(?, notify_maintenance),
-        notify_weekly_email = COALESCE(?, notify_weekly_email),
         updated_at = ?
       WHERE id = ?`,
     )
       .bind(
         body.submissions === undefined ? null : body.submissions ? 1 : 0,
         body.maintenance === undefined ? null : body.maintenance ? 1 : 0,
-        body.weeklyEmail === undefined ? null : body.weeklyEmail ? 1 : 0,
         nowIso(),
         user.id,
       )
@@ -394,11 +390,40 @@ async function handle(request: Request, env: Env): Promise<Response> {
       return error('Topic and a detailed message are required')
     }
     const ticketId = id('ticket')
+    const message = body.message.trim()
     await env.DB.prepare(
       `INSERT INTO support_tickets (id, user_id, website_id, topic, message) VALUES (?, ?, ?, ?, ?)`,
     )
-      .bind(ticketId, user.id, websiteId, body.topic, body.message.trim())
+      .bind(ticketId, user.id, websiteId, body.topic, message)
       .run()
+
+    const supportTo = env.SUPPORT_EMAIL || 'nic@blacnova.net'
+    const website = await getWebsite(env, websiteId)
+    try {
+      const esc = (s: string) =>
+        s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      await sendBrevoEmail(env, {
+        toEmail: supportTo,
+        toName: 'Blacnova Development',
+        subject: `Dashboard support — ${body.topic} — ${website?.name || websiteId}`,
+        text: [
+          `Support ticket from the client dashboard`,
+          '',
+          `From: ${user.name} <${user.email}>`,
+          `Website: ${website?.name || '—'} (${website?.domain || websiteId})`,
+          `Topic: ${body.topic}`,
+          '',
+          message,
+        ].join('\n'),
+        html: `<p>From: ${esc(user.name)} &lt;${esc(user.email)}&gt;</p>
+<p>Website: ${esc(website?.name || '—')} (${esc(website?.domain || websiteId)})</p>
+<p>Topic: ${esc(body.topic)}</p>
+<p>${esc(message).replace(/\n/g, '<br>')}</p>`,
+      })
+    } catch (err) {
+      console.error(JSON.stringify({ support_email_failed: String(err), ticketId }))
+    }
+
     return json({ ok: true, id: ticketId })
   }
 

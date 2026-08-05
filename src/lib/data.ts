@@ -29,13 +29,12 @@ export async function getWebsite(env: Env, websiteId: string) {
 
 export async function getUserProfile(env: Env, user: SessionUser) {
   const row = await env.DB.prepare(
-    `SELECT notify_submissions, notify_maintenance, notify_weekly_email FROM users WHERE id = ?`,
+    `SELECT notify_submissions, notify_maintenance FROM users WHERE id = ?`,
   )
     .bind(user.id)
     .first<{
       notify_submissions: number
       notify_maintenance: number
-      notify_weekly_email: number
     }>()
 
   const website = await getWebsite(env, user.websiteId)
@@ -50,8 +49,8 @@ export async function getUserProfile(env: Env, user: SessionUser) {
     preferences: {
       submissions: Boolean(row?.notify_submissions ?? 1),
       maintenance: Boolean(row?.notify_maintenance ?? 1),
-      weeklyEmail: Boolean(row?.notify_weekly_email ?? 0),
     },
+    supportEmail: env.SUPPORT_EMAIL || 'nic@blacnova.net',
     website,
   }
 }

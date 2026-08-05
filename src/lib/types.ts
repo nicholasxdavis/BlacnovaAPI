@@ -14,6 +14,8 @@ export interface Env {
   BREVO_API_KEY: string
   BREVO_SENDER_EMAIL?: string
   BREVO_SENDER_NAME?: string
+  /** Agency support inbox for all client portals (default nic@blacnova.net) */
+  SUPPORT_EMAIL?: string
   /** Buy Me a Coffee webhook signing secret */
   BMC_WEBHOOK_SECRET?: string
   /** Optional personal access token for historical sync */

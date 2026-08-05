@@ -30,7 +30,8 @@
     "GITHUB_REPO": "nicholasxdavis/BlacnovaWebsite",
     "GITHUB_BRANCH": "main",
     "BREVO_SENDER_EMAIL": "nic@blacnova.net",
-    "BREVO_SENDER_NAME": "Blacnova Development"
+    "BREVO_SENDER_NAME": "Blacnova Development",
+    "SUPPORT_EMAIL": "nic@blacnova.net"
   },
   "triggers": {
     "crons": ["0 15 * * *"]
