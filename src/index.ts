@@ -1,4 +1,5 @@
 import { hashPassword, verifyPassword } from './lib/auth'
+import { getAnalyticsSeries, recordPageview, seriesDeltas } from './lib/analytics'
 import {
   getUserProfile,
   getWebsite,
@@ -64,6 +65,10 @@ async function handle(request: Request, env: Env): Promise<Response> {
 
   if (path === '/v1/public/submissions' && method === 'POST') {
     return createPublicSubmission(request, env)
+  }
+
+  if (path === '/v1/public/analytics/collect' && method === 'POST') {
+    return collectAnalytics(request, env)
   }
 
   if (path.startsWith('/v1/media/') && path.endsWith('/file') && method === 'GET') {
@@ -200,9 +205,11 @@ async function handle(request: Request, env: Env): Promise<Response> {
     if (!current) return error('Maintenance config not found', 404)
 
     const enabled = body.enabled ?? Boolean(current.enabled)
-    const title = body.title ?? current.title
-    const message = body.message ?? current.message
-    const expectedReturn = body.expectedReturn ?? current.expected_return
+    const title = clampString(body.title ?? current.title, 120)
+    const message = clampString(body.message ?? current.message, 800)
+    const expectedReturn = clampString(body.expectedReturn ?? current.expected_return, 40)
+
+    if (!title || !message) return error('Title and message are required')
 
     await env.DB.prepare(
       `UPDATE maintenance SET enabled = ?, title = ?, message = ?, expected_return = ?, updated_at = ? WHERE website_id = ?`,
@@ -213,6 +220,28 @@ async function handle(request: Request, env: Env): Promise<Response> {
     await env.DB.prepare(`UPDATE websites SET status = ?, updated_at = ? WHERE id = ?`)
       .bind(enabled ? 'maintenance' : 'live', nowIso(), websiteId)
       .run()
+
+    // Mirror to GitHub so static Pages can also read a fallback flag
+    if (env.GITHUB_TOKEN) {
+      try {
+        const { getFileSha, putRepoFile } = await import('./lib/github')
+        const payload = JSON.stringify(
+          { enabled, title, message, expectedReturn, updatedAt: nowIso() },
+          null,
+          2,
+        )
+        const sha = await getFileSha(env, 'maintenance.json')
+        await putRepoFile(
+          env,
+          'maintenance.json',
+          `${payload}\n`,
+          `Update maintenance mode (${enabled ? 'on' : 'off'}) via Blacnova Dashboard (${user.email})`,
+          sha,
+        )
+      } catch (err) {
+        console.error('maintenance github mirror failed', String(err))
+      }
+    }
 
     return json({
       maintenance: { enabled, title, message, expectedReturn },
@@ -264,18 +293,11 @@ async function handle(request: Request, env: Env): Promise<Response> {
   }
 
   if (path === '/v1/analytics' && method === 'GET') {
-    const { results } = await env.DB.prepare(
-      `SELECT date, visitors, pageviews, submissions FROM analytics_points WHERE website_id = ? ORDER BY date ASC`,
-    )
-      .bind(websiteId)
-      .all()
+    const analytics = await getAnalyticsSeries(env, websiteId)
     return json({
-      analytics: (results || []).map((r) => ({
-        date: (r as { date: string }).date,
-        visitors: (r as { visitors: number }).visitors,
-        pageviews: (r as { pageviews: number }).pageviews,
-        submissions: (r as { submissions: number }).submissions,
-      })),
+      analytics,
+      deltas: seriesDeltas(analytics),
+      source: 'cloudflare-workers',
     })
   }
 
@@ -491,6 +513,30 @@ async function publicRoutes(request: Request, env: Env, path: string): Promise<R
   }
 
   return error('Not found', 404)
+}
+
+async function collectAnalytics(request: Request, env: Env): Promise<Response> {
+  const ip = clientIp(request)
+  const allowed = await rateLimit(env, `pv:${ip}`, 120, 60)
+  if (!allowed) return json({ ok: true, throttled: true })
+
+  let body: { domain?: string; path?: string; referrer?: string }
+  try {
+    body = (await request.json()) as typeof body
+  } catch {
+    return error('Invalid JSON body')
+  }
+
+  const domain = clampString(body.domain, 120)
+  if (!domain) return error('domain is required')
+
+  await recordPageview(env, request, {
+    domain,
+    path: clampString(body.path, 300) || '/',
+    referrer: clampString(body.referrer, 300),
+  })
+
+  return new Response(null, { status: 204 })
 }
 
 async function createPublicSubmission(request: Request, env: Env): Promise<Response> {
@@ -718,11 +764,7 @@ async function loadDashboard(request: Request, env: Env, websiteId: string): Pro
     env.DB.prepare(`SELECT * FROM submissions WHERE website_id = ? ORDER BY created_at DESC`)
       .bind(websiteId)
       .all(),
-    env.DB.prepare(
-      `SELECT date, visitors, pageviews, submissions FROM analytics_points WHERE website_id = ? ORDER BY date ASC`,
-    )
-      .bind(websiteId)
-      .all(),
+    getAnalyticsSeries(env, websiteId),
   ])
 
   return json({
@@ -746,11 +788,8 @@ async function loadDashboard(request: Request, env: Env, websiteId: string): Pro
           expectedReturn: '',
         },
     submissions: (submissions.results || []).map((r) => mapSubmission(r as never)),
-    analytics: (analytics.results || []).map((r) => ({
-      date: (r as { date: string }).date,
-      visitors: (r as { visitors: number }).visitors,
-      pageviews: (r as { pageviews: number }).pageviews,
-      submissions: (r as { submissions: number }).submissions,
-    })),
+    analytics,
+    deltas: seriesDeltas(analytics),
+    source: 'cloudflare-workers',
   })
 }
