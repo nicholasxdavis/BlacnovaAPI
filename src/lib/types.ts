@@ -14,6 +14,10 @@ export interface Env {
   BREVO_API_KEY: string
   BREVO_SENDER_EMAIL?: string
   BREVO_SENDER_NAME?: string
+  /** Buy Me a Coffee webhook signing secret */
+  BMC_WEBHOOK_SECRET?: string
+  /** Optional personal access token for historical sync */
+  BMC_ACCESS_TOKEN?: string
 }
 
 export type ModuleKey =

@@ -2,6 +2,7 @@ import { hashPassword } from './auth'
 import { DEFAULT_CLIENT_MODULES, isPlatformUser } from './admin'
 import { error, id, json, nowIso, today } from './http'
 import { createAndSendInvoice, listInvoices } from './invoices'
+import { getBmcOverview, syncBmcFromApi } from './bmc'
 import { clampString, isValidEmail } from './security'
 import { revokeUserSessions } from './session'
 import { getBillingOverview } from './stripe'
@@ -371,6 +372,21 @@ export async function handleAdmin(
       return json(billing)
     } catch (err) {
       return error(err instanceof Error ? err.message : 'Stripe billing unavailable', 502)
+    }
+  }
+
+  // --- Buy Me a Coffee ---
+  if (path === '/v1/admin/bmc' && method === 'GET') {
+    return json(await getBmcOverview(env))
+  }
+
+  if (path === '/v1/admin/bmc/sync' && method === 'POST') {
+    try {
+      const result = await syncBmcFromApi(env)
+      const overview = await getBmcOverview(env)
+      return json({ ...result, ...overview })
+    } catch (err) {
+      return error(err instanceof Error ? err.message : 'BMC sync failed', 502)
     }
   }
 

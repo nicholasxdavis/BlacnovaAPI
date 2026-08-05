@@ -15,6 +15,7 @@ import { publishMediaToGitHub, publishWebsiteContent } from './lib/publish'
 import { clampString, clientIp, isValidEmail, rateLimit } from './lib/security'
 import { createSession, destroySession, getSessionUser } from './lib/session'
 import { handleAdmin } from './lib/adminRoutes'
+import { ingestBmcWebhook, verifyBmcSignature } from './lib/bmc'
 import { processDueRecurringInvoices } from './lib/invoices'
 import type { Env } from './lib/types'
 
@@ -88,6 +89,10 @@ async function handle(request: Request, env: Env): Promise<Response> {
 
   if (path === '/v1/public/analytics/collect' && method === 'POST') {
     return collectAnalytics(request, env)
+  }
+
+  if (path === '/v1/webhooks/buymeacoffee' && method === 'POST') {
+    return handleBmcWebhook(request, env)
   }
 
   if (path.startsWith('/v1/media/') && path.endsWith('/file') && method === 'GET') {
@@ -816,4 +821,33 @@ async function loadDashboard(request: Request, env: Env, websiteId: string): Pro
     deltas: seriesDeltas(analytics),
     source: 'cloudflare-workers',
   })
+}
+
+async function handleBmcWebhook(request: Request, env: Env): Promise<Response> {
+  const rawBody = await request.text()
+  const signature =
+    request.headers.get('x-signature-sha256') || request.headers.get('x-bmc-signature')
+
+  if (env.BMC_WEBHOOK_SECRET) {
+    const valid = await verifyBmcSignature(rawBody, env.BMC_WEBHOOK_SECRET, signature)
+    if (!valid) return error('Invalid webhook signature', 401)
+  } else {
+    console.warn(JSON.stringify({ warn: 'BMC_WEBHOOK_SECRET not set — accepting unsigned webhook' }))
+  }
+
+  // Legacy header event name if envelope lacks type
+  let bodyForIngest = rawBody
+  try {
+    const parsed = JSON.parse(rawBody) as Record<string, unknown>
+    if (!parsed.type && request.headers.get('x-bmc-event')) {
+      parsed.type = String(request.headers.get('x-bmc-event'))
+      bodyForIngest = JSON.stringify(parsed)
+    }
+  } catch {
+    /* ingest will reject */
+  }
+
+  const result = await ingestBmcWebhook(env, bodyForIngest)
+  if (!result.ok) return error(result.error, 400)
+  return json({ ok: true, id: result.id })
 }
