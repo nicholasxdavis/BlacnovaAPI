@@ -1,4 +1,5 @@
 import { parseModules } from './session'
+import { isPlatformUser } from './admin'
 import type { Env, SessionUser } from './types'
 
 export async function getWebsite(env: Env, websiteId: string) {
@@ -44,6 +45,7 @@ export async function getUserProfile(env: Env, user: SessionUser) {
       email: user.email,
       name: user.name,
       role: user.role,
+      isPlatform: isPlatformUser(user),
     },
     preferences: {
       submissions: Boolean(row?.notify_submissions ?? 1),

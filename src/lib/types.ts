@@ -8,6 +8,8 @@ export interface Env {
   /** e.g. nicholasxdavis/BlacnovaWebsite */
   GITHUB_REPO: string
   GITHUB_BRANCH?: string
+  STRIPE_SECRET_KEY: string
+  STRIPE_PUBLISHABLE_KEY?: string
 }
 
 export type ModuleKey =

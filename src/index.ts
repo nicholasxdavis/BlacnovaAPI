@@ -14,6 +14,7 @@ import { corsHeaders, error, formatBytes, id, json, nowIso, today } from './lib/
 import { publishMediaToGitHub, publishWebsiteContent } from './lib/publish'
 import { clampString, clientIp, isValidEmail, rateLimit } from './lib/security'
 import { createSession, destroySession, getSessionUser } from './lib/session'
+import { handleAdmin } from './lib/adminRoutes'
 import type { Env } from './lib/types'
 
 export default {
@@ -89,6 +90,9 @@ async function handle(request: Request, env: Env): Promise<Response> {
 
   const { user, token } = auth
   const websiteId = user.websiteId
+
+  const adminResponse = await handleAdmin(request, env, user, path, method)
+  if (adminResponse) return adminResponse
 
   if (path === '/v1/auth/me' && method === 'GET') {
     return json(await getUserProfile(env, user))
@@ -405,7 +409,7 @@ async function login(request: Request, env: Env): Promise<Response> {
   if (!email || !password) return error('Email and password are required')
 
   const row = await env.DB.prepare(
-    `SELECT id, email, name, role, website_id, password_hash FROM users WHERE email = ?`,
+    `SELECT id, email, name, role, website_id, password_hash, COALESCE(active, 1) AS active FROM users WHERE email = ?`,
   )
     .bind(email)
     .first<{
@@ -415,11 +419,13 @@ async function login(request: Request, env: Env): Promise<Response> {
       role: string
       website_id: string
       password_hash: string
+      active: number
     }>()
 
   if (!row || !(await verifyPassword(password, row.password_hash))) {
     return error('Invalid email or password', 401)
   }
+  if (!row.active) return error('This account has been deactivated', 403)
 
   const token = await createSession(env, row.id)
   const profile = await getUserProfile(env, {

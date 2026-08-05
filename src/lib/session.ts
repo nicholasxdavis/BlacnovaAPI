@@ -22,6 +22,13 @@ export async function destroySession(env: Env, token: string): Promise<void> {
   await env.SESSIONS.delete(token)
 }
 
+/** Invalidate all sessions created before now for a user (password reset / deactivate). */
+export async function revokeUserSessions(env: Env, userId: string): Promise<void> {
+  await env.SESSIONS.put(`revoke:${userId}`, new Date().toISOString(), {
+    expirationTtl: SESSION_TTL_SECONDS,
+  })
+}
+
 export async function getSessionUser(
   env: Env,
   request: Request,
@@ -39,8 +46,14 @@ export async function getSessionUser(
     return null
   }
 
+  const revokedAt = await env.SESSIONS.get(`revoke:${session.userId}`)
+  if (revokedAt && new Date(session.createdAt).getTime() <= new Date(revokedAt).getTime()) {
+    await env.SESSIONS.delete(token)
+    return null
+  }
+
   const row = await env.DB.prepare(
-    `SELECT id, email, name, role, website_id FROM users WHERE id = ?`,
+    `SELECT id, email, name, role, website_id, COALESCE(active, 1) AS active FROM users WHERE id = ?`,
   )
     .bind(session.userId)
     .first<{
@@ -49,9 +62,10 @@ export async function getSessionUser(
       name: string
       role: string
       website_id: string
+      active: number
     }>()
 
-  if (!row) {
+  if (!row || !row.active) {
     await env.SESSIONS.delete(token)
     return null
   }

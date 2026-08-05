@@ -1,0 +1,377 @@
+import { hashPassword } from './auth'
+import { DEFAULT_CLIENT_MODULES, isPlatformUser } from './admin'
+import { error, id, json, nowIso, today } from './http'
+import { clampString, isValidEmail } from './security'
+import { revokeUserSessions } from './session'
+import { getBillingOverview } from './stripe'
+import type { Env, SessionUser } from './types'
+
+const WEBSITE_STATUSES = new Set(['live', 'maintenance', 'offline'])
+
+function parseModules(raw: string): string[] {
+  try {
+    const parsed = JSON.parse(raw)
+    return Array.isArray(parsed) ? parsed.map(String) : [...DEFAULT_CLIENT_MODULES]
+  } catch {
+    return [...DEFAULT_CLIENT_MODULES]
+  }
+}
+
+async function seedWebsiteDefaults(env: Env, websiteId: string, name: string) {
+  await env.DB.prepare(
+    `INSERT INTO maintenance (website_id, enabled, title, message, expected_return)
+     VALUES (?, 0, ?, ?, '')`,
+  )
+    .bind(
+      websiteId,
+      "We'll be right back",
+      `${name} is temporarily offline for improvements. Please check back soon.`,
+    )
+    .run()
+
+  const homeId = 'home'
+  await env.DB.prepare(
+    `INSERT INTO pages (id, website_id, title, slug, status, updated_at) VALUES (?, ?, 'Home', '/', 'published', ?)`,
+  )
+    .bind(homeId, websiteId, today())
+    .run()
+
+  await env.DB.prepare(
+    `INSERT INTO content_blocks
+      (id, website_id, page_id, page_name, section, label, type, value, published, sort_order)
+     VALUES (?, ?, 'home', 'Home', 'Hero', 'Headline', 'heading', ?, 1, 1)`,
+  )
+    .bind(id('c'), websiteId, `Welcome to ${name}`)
+    .run()
+}
+
+export async function handleAdmin(
+  request: Request,
+  env: Env,
+  user: SessionUser,
+  path: string,
+  method: string,
+): Promise<Response | null> {
+  if (!path.startsWith('/v1/admin')) return null
+  if (!isPlatformUser(user)) return error('Forbidden — platform admin only', 403)
+
+  // --- Clients (websites) ---
+  if (path === '/v1/admin/clients' && method === 'GET') {
+    const { results } = await env.DB.prepare(
+      `SELECT w.*,
+        (SELECT COUNT(*) FROM users u WHERE u.website_id = w.id) AS account_count,
+        (SELECT COUNT(*) FROM submissions s WHERE s.website_id = w.id AND s.status = 'new') AS new_submissions
+       FROM websites w
+       ORDER BY w.name COLLATE NOCASE`,
+    ).all<{
+      id: string
+      name: string
+      domain: string
+      status: string
+      modules: string
+      github_repo: string | null
+      created_at: string
+      updated_at: string
+      account_count: number
+      new_submissions: number
+    }>()
+
+    return json({
+      clients: (results || []).map((w) => ({
+        id: w.id,
+        name: w.name,
+        domain: w.domain,
+        status: w.status,
+        modules: parseModules(w.modules),
+        githubRepo: w.github_repo,
+        accountCount: Number(w.account_count) || 0,
+        newSubmissions: Number(w.new_submissions) || 0,
+        createdAt: w.created_at,
+        updatedAt: w.updated_at,
+      })),
+    })
+  }
+
+  if (path === '/v1/admin/clients' && method === 'POST') {
+    const body = (await request.json()) as {
+      name?: string
+      domain?: string
+      githubRepo?: string
+      modules?: string[]
+    }
+    const name = clampString(body.name, 120)
+    const domain = clampString(body.domain, 120).toLowerCase()
+    if (!name || !domain) return error('Name and domain are required')
+
+    const exists = await env.DB.prepare(`SELECT id FROM websites WHERE domain = ?`)
+      .bind(domain)
+      .first()
+    if (exists) return error('A client with that domain already exists', 409)
+
+    const websiteId = id('site')
+    const modules = JSON.stringify(
+      Array.isArray(body.modules) && body.modules.length
+        ? body.modules
+        : [...DEFAULT_CLIENT_MODULES],
+    )
+    await env.DB.prepare(
+      `INSERT INTO websites (id, name, domain, status, modules, github_repo)
+       VALUES (?, ?, ?, 'live', ?, ?)`,
+    )
+      .bind(websiteId, name, domain, modules, clampString(body.githubRepo, 200) || null)
+      .run()
+    await seedWebsiteDefaults(env, websiteId, name)
+
+    return json({ id: websiteId, name, domain }, 201)
+  }
+
+  if (path.startsWith('/v1/admin/clients/') && method === 'PATCH') {
+    const clientId = path.slice('/v1/admin/clients/'.length)
+    const body = (await request.json()) as {
+      name?: string
+      domain?: string
+      status?: string
+      githubRepo?: string | null
+      modules?: string[]
+    }
+    const existing = await env.DB.prepare(`SELECT id FROM websites WHERE id = ?`)
+      .bind(clientId)
+      .first()
+    if (!existing) return error('Client not found', 404)
+
+    if (body.domain) {
+      const clash = await env.DB.prepare(
+        `SELECT id FROM websites WHERE domain = ? AND id != ?`,
+      )
+        .bind(clampString(body.domain, 120).toLowerCase(), clientId)
+        .first()
+      if (clash) return error('Domain already in use', 409)
+    }
+
+    if (body.status !== undefined && !WEBSITE_STATUSES.has(body.status)) {
+      return error('Status must be live, maintenance, or offline')
+    }
+
+    await env.DB.prepare(
+      `UPDATE websites SET
+        name = COALESCE(?, name),
+        domain = COALESCE(?, domain),
+        status = COALESCE(?, status),
+        github_repo = CASE WHEN ? = 1 THEN ? ELSE github_repo END,
+        modules = COALESCE(?, modules),
+        updated_at = ?
+       WHERE id = ?`,
+    )
+      .bind(
+        body.name !== undefined ? clampString(body.name, 120) : null,
+        body.domain !== undefined ? clampString(body.domain, 120).toLowerCase() : null,
+        body.status !== undefined ? body.status : null,
+        body.githubRepo !== undefined ? 1 : 0,
+        body.githubRepo !== undefined ? clampString(String(body.githubRepo || ''), 200) || null : null,
+        body.modules ? JSON.stringify(body.modules) : null,
+        nowIso(),
+        clientId,
+      )
+      .run()
+
+    return json({ ok: true })
+  }
+
+  if (path.startsWith('/v1/admin/clients/') && method === 'DELETE') {
+    const clientId = path.slice('/v1/admin/clients/'.length)
+    if (clientId === user.websiteId) {
+      return error('Cannot delete the website attached to your own account', 400)
+    }
+    const existing = await env.DB.prepare(`SELECT id FROM websites WHERE id = ?`)
+      .bind(clientId)
+      .first()
+    if (!existing) return error('Client not found', 404)
+
+    await env.DB.batch([
+      env.DB.prepare(`DELETE FROM users WHERE website_id = ?`).bind(clientId),
+      env.DB.prepare(`DELETE FROM content_blocks WHERE website_id = ?`).bind(clientId),
+      env.DB.prepare(`DELETE FROM pages WHERE website_id = ?`).bind(clientId),
+      env.DB.prepare(`DELETE FROM media_items WHERE website_id = ?`).bind(clientId),
+      env.DB.prepare(`DELETE FROM maintenance WHERE website_id = ?`).bind(clientId),
+      env.DB.prepare(`DELETE FROM submissions WHERE website_id = ?`).bind(clientId),
+      env.DB.prepare(`DELETE FROM analytics_points WHERE website_id = ?`).bind(clientId),
+      env.DB.prepare(`DELETE FROM support_tickets WHERE website_id = ?`).bind(clientId),
+      env.DB.prepare(`DELETE FROM websites WHERE id = ?`).bind(clientId),
+    ])
+    return json({ ok: true })
+  }
+
+  // --- Accounts (dashboard users) ---
+  if (path === '/v1/admin/accounts' && method === 'GET') {
+    const { results } = await env.DB.prepare(
+      `SELECT u.id, u.email, u.name, u.role, u.website_id, u.active, u.created_at, u.updated_at,
+              w.name AS website_name, w.domain AS website_domain
+       FROM users u
+       LEFT JOIN websites w ON w.id = u.website_id
+       ORDER BY u.created_at DESC`,
+    ).all<{
+      id: string
+      email: string
+      name: string
+      role: string
+      website_id: string
+      active: number
+      created_at: string
+      updated_at: string
+      website_name: string | null
+      website_domain: string | null
+    }>()
+
+    return json({
+      accounts: (results || []).map((u) => ({
+        id: u.id,
+        email: u.email,
+        name: u.name,
+        role: u.role,
+        websiteId: u.website_id,
+        websiteName: u.website_name,
+        websiteDomain: u.website_domain,
+        active: Boolean(u.active ?? 1),
+        createdAt: u.created_at,
+        updatedAt: u.updated_at,
+      })),
+    })
+  }
+
+  if (path === '/v1/admin/accounts' && method === 'POST') {
+    const body = (await request.json()) as {
+      email?: string
+      name?: string
+      password?: string
+      websiteId?: string
+      role?: string
+    }
+    const email = clampString(body.email, 254).toLowerCase()
+    const name = clampString(body.name, 120)
+    const password = String(body.password || '')
+    const websiteId = clampString(body.websiteId, 64)
+    const role = body.role === 'platform' ? 'platform' : 'manager'
+
+    if (!email || !name || !password || !websiteId) {
+      return error('email, name, password, and websiteId are required')
+    }
+    if (!isValidEmail(email)) return error('A valid email is required')
+    if (password.length < 4) return error('Password must be at least 4 characters')
+
+    const website = await env.DB.prepare(`SELECT id FROM websites WHERE id = ?`)
+      .bind(websiteId)
+      .first()
+    if (!website) return error('Website not found', 404)
+
+    const exists = await env.DB.prepare(`SELECT id FROM users WHERE email = ?`).bind(email).first()
+    if (exists) return error('An account with that email already exists', 409)
+
+    const userId = id('user')
+    const passwordHash = await hashPassword(password)
+    await env.DB.prepare(
+      `INSERT INTO users (id, email, name, role, password_hash, website_id, active)
+       VALUES (?, ?, ?, ?, ?, ?, 1)`,
+    )
+      .bind(userId, email, name, role, passwordHash, websiteId)
+      .run()
+
+    return json({ id: userId, email, name, role, websiteId }, 201)
+  }
+
+  if (path.match(/^\/v1\/admin\/accounts\/[^/]+\/reset-password$/) && method === 'POST') {
+    const accountId = path.split('/')[4]
+    const body = (await request.json()) as { password?: string }
+    const password = String(body.password || '')
+    if (password.length < 4) return error('Password must be at least 4 characters')
+
+    const existing = await env.DB.prepare(`SELECT id FROM users WHERE id = ?`)
+      .bind(accountId)
+      .first()
+    if (!existing) return error('Account not found', 404)
+
+    const passwordHash = await hashPassword(password)
+    await env.DB.prepare(`UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?`)
+      .bind(passwordHash, nowIso(), accountId)
+      .run()
+    await revokeUserSessions(env, accountId)
+    return json({ ok: true })
+  }
+
+  if (path.startsWith('/v1/admin/accounts/') && method === 'PATCH') {
+    const accountId = path.slice('/v1/admin/accounts/'.length)
+    if (accountId.includes('/')) return error('Not found', 404)
+    const body = (await request.json()) as {
+      name?: string
+      role?: string
+      websiteId?: string
+      active?: boolean
+    }
+    const existing = await env.DB.prepare(`SELECT id FROM users WHERE id = ?`)
+      .bind(accountId)
+      .first()
+    if (!existing) return error('Account not found', 404)
+
+    if (accountId === user.id && body.active === false) {
+      return error('Cannot deactivate your own account', 400)
+    }
+    if (accountId === user.id && body.role === 'manager') {
+      return error('Cannot remove platform access from your own account', 400)
+    }
+
+    if (body.websiteId) {
+      const website = await env.DB.prepare(`SELECT id FROM websites WHERE id = ?`)
+        .bind(body.websiteId)
+        .first()
+      if (!website) return error('Website not found', 404)
+    }
+
+    await env.DB.prepare(
+      `UPDATE users SET
+        name = COALESCE(?, name),
+        role = COALESCE(?, role),
+        website_id = COALESCE(?, website_id),
+        active = COALESCE(?, active),
+        updated_at = ?
+       WHERE id = ?`,
+    )
+      .bind(
+        body.name !== undefined ? clampString(body.name, 120) : null,
+        body.role === 'platform' || body.role === 'manager' ? body.role : null,
+        body.websiteId ?? null,
+        body.active === undefined ? null : body.active ? 1 : 0,
+        nowIso(),
+        accountId,
+      )
+      .run()
+
+    if (body.active === false) {
+      await revokeUserSessions(env, accountId)
+    }
+
+    return json({ ok: true })
+  }
+
+  if (path.startsWith('/v1/admin/accounts/') && method === 'DELETE') {
+    const accountId = path.slice('/v1/admin/accounts/'.length)
+    if (accountId === user.id) return error('Cannot delete your own account', 400)
+    const existing = await env.DB.prepare(`SELECT id FROM users WHERE id = ?`)
+      .bind(accountId)
+      .first()
+    if (!existing) return error('Account not found', 404)
+    await env.DB.prepare(`DELETE FROM users WHERE id = ?`).bind(accountId).run()
+    await revokeUserSessions(env, accountId)
+    return json({ ok: true })
+  }
+
+  // --- Billing (Stripe) ---
+  if (path === '/v1/admin/billing' && method === 'GET') {
+    try {
+      const billing = await getBillingOverview(env)
+      return json(billing)
+    } catch (err) {
+      return error(err instanceof Error ? err.message : 'Stripe billing unavailable', 502)
+    }
+  }
+
+  return error('Not found', 404)
+}
