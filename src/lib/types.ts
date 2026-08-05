@@ -3,6 +3,11 @@ export interface Env {
   MEDIA: KVNamespace
   SESSIONS: KVNamespace
   CORS_ORIGINS: string
+  /** GitHub PAT with repo scope — set via `wrangler secret put GITHUB_TOKEN` */
+  GITHUB_TOKEN: string
+  /** e.g. nicholasxdavis/BlacnovaWebsite */
+  GITHUB_REPO: string
+  GITHUB_BRANCH?: string
 }
 
 export type ModuleKey =

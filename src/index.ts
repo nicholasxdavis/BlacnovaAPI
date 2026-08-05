@@ -8,7 +8,10 @@ import {
   mapSubmission,
   mediaUrl,
 } from './lib/data'
+import { GitHubError } from './lib/github'
 import { corsHeaders, error, formatBytes, id, json, nowIso, today } from './lib/http'
+import { publishMediaToGitHub, publishWebsiteContent } from './lib/publish'
+import { clampString, clientIp, isValidEmail, rateLimit } from './lib/security'
 import { createSession, destroySession, getSessionUser } from './lib/session'
 import type { Env } from './lib/types'
 
@@ -30,7 +33,10 @@ export default {
         headers,
       })
     } catch (err) {
-      console.error(err)
+      console.error(JSON.stringify({ err: String(err), stack: err instanceof Error ? err.stack : undefined }))
+      if (err instanceof GitHubError) {
+        return error(err.message, err.status >= 400 && err.status < 600 ? err.status : 502, cors)
+      }
       return error('Internal server error', 500, cors)
     }
   },
@@ -42,7 +48,13 @@ async function handle(request: Request, env: Env): Promise<Response> {
   const method = request.method
 
   if (path === '/' && method === 'GET') {
-    return json({ ok: true, service: 'blacnova-api', version: '1' })
+    return json({
+      ok: true,
+      service: 'blacnova-api',
+      version: '1',
+      github: Boolean(env.GITHUB_TOKEN),
+      repo: env.GITHUB_REPO || null,
+    })
   }
 
   // --- Public ---
@@ -279,12 +291,12 @@ async function handle(request: Request, env: Env): Promise<Response> {
   }
 
   if (path === '/v1/media' && method === 'POST') {
-    return uploadMedia(request, env, websiteId)
+    return uploadMedia(request, env, websiteId, user.email)
   }
 
   if (path.startsWith('/v1/media/') && method === 'PUT') {
     const mediaId = path.slice('/v1/media/'.length)
-    return replaceMedia(request, env, websiteId, mediaId)
+    return replaceMedia(request, env, websiteId, mediaId, user.email)
   }
 
   if (path.startsWith('/v1/media/') && method === 'DELETE') {
@@ -339,6 +351,21 @@ async function handle(request: Request, env: Env): Promise<Response> {
       .bind(ticketId, user.id, websiteId, body.topic, body.message.trim())
       .run()
     return json({ ok: true, id: ticketId })
+  }
+
+  if (path === '/v1/publish' && method === 'POST') {
+    if (!env.GITHUB_TOKEN) {
+      return error('GitHub publishing is not configured', 503)
+    }
+    const result = await publishWebsiteContent(env, websiteId, user.email)
+    return json({
+      ok: true,
+      publishedAt: nowIso(),
+      blocks: result.blocks,
+      files: result.files,
+      siteUrl: 'https://www.blacnova.net/',
+      repo: env.GITHUB_REPO,
+    })
   }
 
   if (path === '/v1/dashboard' && method === 'GET') {
@@ -467,7 +494,11 @@ async function publicRoutes(request: Request, env: Env, path: string): Promise<R
 }
 
 async function createPublicSubmission(request: Request, env: Env): Promise<Response> {
-  const body = (await request.json()) as {
+  const ip = clientIp(request)
+  const allowed = await rateLimit(env, `submit:${ip}`, 20, 60 * 60)
+  if (!allowed) return error('Too many submissions. Try again later.', 429)
+
+  let body: {
     domain?: string
     name?: string
     email?: string
@@ -476,11 +507,24 @@ async function createPublicSubmission(request: Request, env: Env): Promise<Respo
     message?: string
     source?: string
   }
+  try {
+    body = (await request.json()) as typeof body
+  } catch {
+    return error('Invalid JSON body')
+  }
 
-  const domain = (body.domain || '').trim()
-  if (!domain || !body.name || !body.email || !body.message) {
+  const domain = clampString(body.domain, 120)
+  const name = clampString(body.name, 120)
+  const email = clampString(body.email, 254).toLowerCase()
+  const message = clampString(body.message, 5000)
+  const phone = clampString(body.phone, 40) || null
+  const subject = clampString(body.subject, 200) || 'Website inquiry'
+  const source = clampString(body.source, 80) || 'Contact form'
+
+  if (!domain || !name || !email || !message) {
     return error('domain, name, email, and message are required')
   }
+  if (!isValidEmail(email)) return error('A valid email is required')
 
   const website = await env.DB.prepare(`SELECT id FROM websites WHERE domain = ?`)
     .bind(domain)
@@ -492,17 +536,7 @@ async function createPublicSubmission(request: Request, env: Env): Promise<Respo
     `INSERT INTO submissions (id, website_id, name, email, phone, subject, message, source, status, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'new', ?)`,
   )
-    .bind(
-      submissionId,
-      website.id,
-      body.name.trim(),
-      body.email.trim(),
-      body.phone || null,
-      body.subject || 'Website inquiry',
-      body.message.trim(),
-      body.source || 'Contact form',
-      nowIso(),
-    )
+    .bind(submissionId, website.id, name, email, phone, subject, message, source, nowIso())
     .run()
 
   return json({ ok: true, id: submissionId }, 201)
@@ -531,24 +565,35 @@ async function serveMediaFile(env: Env, path: string): Promise<Response> {
   })
 }
 
-async function uploadMedia(request: Request, env: Env, websiteId: string): Promise<Response> {
+async function uploadMedia(request: Request, env: Env, websiteId: string, actorEmail: string): Promise<Response> {
   const form = await request.formData()
   const file = form.get('file')
-  const name = String(form.get('name') || (file instanceof File ? file.name : 'upload'))
+  const name = String(form.get('name') || (file instanceof File ? file.name : 'upload')).slice(0, 180)
   const type = String(form.get('type') || 'image')
-  const usedOn = String(form.get('usedOn') || '')
+  const usedOn = String(form.get('usedOn') || '').slice(0, 120)
 
   if (!(file instanceof File)) return error('file is required')
+  if (file.size > 8 * 1024 * 1024) return error('File must be under 8 MB')
 
   const mediaId = id('media')
   const bytes = await file.arrayBuffer()
   const contentType = file.type || 'application/octet-stream'
 
   await env.MEDIA.put(mediaId, bytes)
-  await env.MEDIA.put(
-    `${mediaId}:meta`,
-    JSON.stringify({ contentType, name }),
-  )
+  await env.MEDIA.put(`${mediaId}:meta`, JSON.stringify({ contentType, name }))
+
+  let publicUrl = mediaUrl(request, mediaId)
+  let githubPath: string | null = null
+
+  if (env.GITHUB_TOKEN && (type === 'image' || contentType.startsWith('image/'))) {
+    try {
+      const published = await publishMediaToGitHub(env, name, bytes, contentType, actorEmail)
+      githubPath = published.path
+      publicUrl = `https://www.blacnova.net/${published.path}`
+    } catch (err) {
+      console.error('github media publish failed', String(err))
+    }
+  }
 
   await env.DB.prepare(
     `INSERT INTO media_items (id, website_id, name, type, size, used_on, content_type, url, updated_at)
@@ -562,13 +607,19 @@ async function uploadMedia(request: Request, env: Env, websiteId: string): Promi
       formatBytes(bytes.byteLength),
       usedOn,
       contentType,
-      mediaUrl(request, mediaId),
+      publicUrl,
       today(),
     )
     .run()
 
   const row = await env.DB.prepare(`SELECT * FROM media_items WHERE id = ?`).bind(mediaId).first()
-  return json({ media: mapMedia(row as never, mediaUrl(request, mediaId)) }, 201)
+  return json(
+    {
+      media: mapMedia(row as never, publicUrl),
+      githubPath,
+    },
+    201,
+  )
 }
 
 async function replaceMedia(
@@ -576,32 +627,54 @@ async function replaceMedia(
   env: Env,
   websiteId: string,
   mediaId: string,
+  actorEmail: string,
 ): Promise<Response> {
   const existing = await env.DB.prepare(
-    `SELECT id FROM media_items WHERE id = ? AND website_id = ?`,
+    `SELECT id, name, url FROM media_items WHERE id = ? AND website_id = ?`,
   )
     .bind(mediaId, websiteId)
-    .first()
+    .first<{ id: string; name: string; url: string | null }>()
   if (!existing) return error('Media not found', 404)
 
   const form = await request.formData()
   const file = form.get('file')
-  const name = form.get('name') ? String(form.get('name')) : undefined
+  const name = form.get('name') ? String(form.get('name')).slice(0, 180) : undefined
   const type = form.get('type') ? String(form.get('type')) : undefined
-  const usedOn = form.get('usedOn') ? String(form.get('usedOn')) : undefined
+  const usedOn = form.get('usedOn') ? String(form.get('usedOn')).slice(0, 120) : undefined
+
+  let publicUrl = existing.url || mediaUrl(request, mediaId)
 
   if (file instanceof File) {
+    if (file.size > 8 * 1024 * 1024) return error('File must be under 8 MB')
     const bytes = await file.arrayBuffer()
     const contentType = file.type || 'application/octet-stream'
     await env.MEDIA.put(mediaId, bytes)
     await env.MEDIA.put(`${mediaId}:meta`, JSON.stringify({ contentType, name: name || file.name }))
+
+    publicUrl = mediaUrl(request, mediaId)
+    if (env.GITHUB_TOKEN && contentType.startsWith('image/')) {
+      try {
+        const published = await publishMediaToGitHub(
+          env,
+          name || existing.name || file.name,
+          bytes,
+          contentType,
+          actorEmail,
+        )
+        publicUrl = `https://www.blacnova.net/${published.path}`
+      } catch (err) {
+        console.error('github media replace failed', String(err))
+      }
+    }
+
     await env.DB.prepare(
-      `UPDATE media_items SET size = ?, content_type = ?, updated_at = ?, name = COALESCE(?, name), type = COALESCE(?, type), used_on = COALESCE(?, used_on) WHERE id = ?`,
+      `UPDATE media_items SET size = ?, content_type = ?, updated_at = ?, url = ?, name = COALESCE(?, name), type = COALESCE(?, type), used_on = COALESCE(?, used_on) WHERE id = ?`,
     )
       .bind(
         formatBytes(bytes.byteLength),
         contentType,
         today(),
+        publicUrl,
         name ?? null,
         type ?? null,
         usedOn ?? null,
@@ -617,7 +690,7 @@ async function replaceMedia(
   }
 
   const row = await env.DB.prepare(`SELECT * FROM media_items WHERE id = ?`).bind(mediaId).first()
-  return json({ media: mapMedia(row as never, mediaUrl(request, mediaId)) })
+  return json({ media: mapMedia(row as never, publicUrl) })
 }
 
 async function loadDashboard(request: Request, env: Env, websiteId: string): Promise<Response> {
