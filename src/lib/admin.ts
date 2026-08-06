@@ -6,7 +6,17 @@ export function isPlatformUser(user: SessionUser): boolean {
 }
 
 export function requirePlatform(user: SessionUser): Response | null {
-  if (!isPlatformUser(user)) return error('Forbidden — platform admin only', 403)
+  if (!isPlatformUser(user)) return error('Forbidden - platform admin only', 403)
+  return null
+}
+
+/** Stripe balance + BMC Finance — Nic only. */
+export function isFinanceOwner(user: SessionUser): boolean {
+  return user.email.toLowerCase() === 'nic@blacnova.net'
+}
+
+export function requireFinanceOwner(user: SessionUser): Response | null {
+  if (!isFinanceOwner(user)) return error('Forbidden - finance access only', 403)
   return null
 }
 

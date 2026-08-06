@@ -1,5 +1,5 @@
 import { hashPassword } from './auth'
-import { DEFAULT_CLIENT_MODULES, isPlatformUser, withBillingModule } from './admin'
+import { DEFAULT_CLIENT_MODULES, isPlatformUser, requireFinanceOwner, withBillingModule } from './admin'
 import { createRetainerInvoice, loadWebsiteBilling, periodKey, restoreWebsiteBilling } from './billing'
 import { error, id, json, nowIso, today } from './http'
 import { createAndSendInvoice, deleteInvoiceRecord, listInvoices } from './invoices'
@@ -468,8 +468,10 @@ export async function handleAdmin(
     return json({ ok: true })
   }
 
-  // --- Billing (Stripe) ---
+  // --- Billing (Stripe) — Nic only ---
   if (path === '/v1/admin/billing' && method === 'GET') {
+    const denied = requireFinanceOwner(user)
+    if (denied) return denied
     try {
       const billing = await getBillingOverview(env)
       return json(billing)
@@ -478,12 +480,16 @@ export async function handleAdmin(
     }
   }
 
-  // --- Buy Me a Coffee ---
+  // --- Buy Me a Coffee — Nic only ---
   if (path === '/v1/admin/bmc' && method === 'GET') {
+    const denied = requireFinanceOwner(user)
+    if (denied) return denied
     return json(await getBmcOverview(env))
   }
 
   if (path === '/v1/admin/bmc/sync' && method === 'POST') {
+    const denied = requireFinanceOwner(user)
+    if (denied) return denied
     try {
       const result = await syncBmcFromApi(env)
       const overview = await getBmcOverview(env)
