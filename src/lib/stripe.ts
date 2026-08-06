@@ -12,7 +12,7 @@ function requireStripeKey(env: Env): string {
 
 async function stripeRequest(
   env: Env,
-  method: 'GET' | 'POST',
+  method: 'GET' | 'POST' | 'DELETE',
   path: string,
   form?: Record<string, string | number | undefined>,
 ): Promise<unknown> {
@@ -34,6 +34,11 @@ async function stripeRequest(
   }
 
   const res = await fetch(`${STRIPE_API}${path}`, { method, headers, body })
+  if (method === 'DELETE' && res.status === 200) {
+    const data = (await res.json()) as { error?: { message?: string }; deleted?: boolean }
+    if (data.error) throw new Error(data.error.message || 'Stripe delete failed')
+    return data
+  }
   const data = (await res.json()) as { error?: { message?: string } }
   if (!res.ok) {
     throw new Error(data.error?.message || `Stripe request failed (${res.status})`)
@@ -217,4 +222,18 @@ export async function createAndFinalizeInvoice(
     hostedInvoiceUrl: finalized.hosted_invoice_url,
     invoicePdf: finalized.invoice_pdf,
   }
+}
+
+/** Void an open Stripe invoice. Paid/void invoices are left alone (caller still forgets locally). */
+export async function voidStripeInvoice(env: Env, stripeInvoiceId: string): Promise<void> {
+  const current = (await stripeGet(env, `/invoices/${stripeInvoiceId}`)) as {
+    id: string
+    status: string
+  }
+  if (current.status === 'paid' || current.status === 'void') return
+  if (current.status === 'draft') {
+    await stripeRequest(env, 'DELETE', `/invoices/${stripeInvoiceId}`)
+    return
+  }
+  await stripeRequest(env, 'POST', `/invoices/${stripeInvoiceId}/void`)
 }

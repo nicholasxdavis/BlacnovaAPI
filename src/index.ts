@@ -318,6 +318,21 @@ async function handle(request: Request, env: Env): Promise<Response> {
     return json({ submission: mapSubmission(row as never) })
   }
 
+  if (path.startsWith('/v1/submissions/') && method === 'DELETE') {
+    const submissionId = path.slice('/v1/submissions/'.length)
+    if (!submissionId || submissionId.includes('/')) return error('Not found', 404)
+    const existing = await env.DB.prepare(
+      `SELECT id FROM submissions WHERE id = ? AND website_id = ?`,
+    )
+      .bind(submissionId, websiteId)
+      .first()
+    if (!existing) return error('Submission not found', 404)
+    await env.DB.prepare(`DELETE FROM submissions WHERE id = ? AND website_id = ?`)
+      .bind(submissionId, websiteId)
+      .run()
+    return json({ ok: true })
+  }
+
   if (path === '/v1/analytics' && method === 'GET') {
     const analytics = await getAnalyticsSeries(env, websiteId)
     return json({

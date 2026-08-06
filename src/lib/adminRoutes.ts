@@ -1,7 +1,7 @@
 import { hashPassword } from './auth'
 import { DEFAULT_CLIENT_MODULES, isPlatformUser } from './admin'
 import { error, id, json, nowIso, today } from './http'
-import { createAndSendInvoice, listInvoices } from './invoices'
+import { createAndSendInvoice, deleteInvoiceRecord, listInvoices } from './invoices'
 import { getBmcOverview, syncBmcFromApi } from './bmc'
 import { clampString, isValidEmail } from './security'
 import { revokeUserSessions } from './session'
@@ -465,6 +465,14 @@ export async function handleAdmin(
     }
   }
 
+  if (path.startsWith('/v1/admin/invoices/') && method === 'DELETE') {
+    const invoiceId = path.slice('/v1/admin/invoices/'.length)
+    if (!invoiceId || invoiceId.includes('/')) return error('Not found', 404)
+    const removed = await deleteInvoiceRecord(env, invoiceId)
+    if (!removed) return error('Invoice not found', 404)
+    return json({ ok: true })
+  }
+
   if (path === '/v1/admin/recurring-invoices' && method === 'GET') {
     const { results } = await env.DB.prepare(
       `SELECT r.*, w.name AS website_name, w.domain AS website_domain
@@ -769,6 +777,17 @@ export async function handleAdmin(
       )
       .run()
 
+    return json({ ok: true })
+  }
+
+  if (path.startsWith('/v1/admin/support/') && method === 'DELETE') {
+    const ticketId = path.slice('/v1/admin/support/'.length)
+    if (!ticketId || ticketId.includes('/')) return error('Not found', 404)
+    const existing = await env.DB.prepare(`SELECT id FROM support_tickets WHERE id = ?`)
+      .bind(ticketId)
+      .first()
+    if (!existing) return error('Ticket not found', 404)
+    await env.DB.prepare(`DELETE FROM support_tickets WHERE id = ?`).bind(ticketId).run()
     return json({ ok: true })
   }
 

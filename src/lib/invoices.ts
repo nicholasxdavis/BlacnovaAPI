@@ -1,6 +1,6 @@
 import { invoiceEmailContent, sendBrevoEmail } from './brevo'
 import { id, nowIso, today } from './http'
-import { createAndFinalizeInvoice, centsToUsd } from './stripe'
+import { createAndFinalizeInvoice, centsToUsd, voidStripeInvoice } from './stripe'
 import type { Env } from './types'
 
 export interface InvoiceDraft {
@@ -94,6 +94,27 @@ export async function listInvoices(env: Env, limit = 50): Promise<InvoiceRecord[
     .all<Parameters<typeof mapInvoiceRow>[0]>()
 
   return (results || []).map(mapInvoiceRow)
+}
+
+/** Remove invoice from the portal ledger. Best-effort void on Stripe when still open. */
+export async function deleteInvoiceRecord(env: Env, invoiceId: string): Promise<boolean> {
+  const row = await env.DB.prepare(
+    `SELECT id, stripe_invoice_id, status FROM invoices WHERE id = ?`,
+  )
+    .bind(invoiceId)
+    .first<{ id: string; stripe_invoice_id: string | null; status: string }>()
+  if (!row) return false
+
+  if (row.stripe_invoice_id && env.STRIPE_SECRET_KEY) {
+    try {
+      await voidStripeInvoice(env, row.stripe_invoice_id)
+    } catch (err) {
+      console.error(JSON.stringify({ invoice_void_failed: String(err), invoiceId }))
+    }
+  }
+
+  await env.DB.prepare(`DELETE FROM invoices WHERE id = ?`).bind(invoiceId).run()
+  return true
 }
 
 export async function createAndSendInvoice(env: Env, draft: InvoiceDraft): Promise<InvoiceRecord> {
