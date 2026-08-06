@@ -1,4 +1,4 @@
-import { sendBrevoEmail } from './brevo'
+import { nonpaymentEmailContent, sendBrevoEmail } from './brevo'
 import { nowIso } from './http'
 import { createAndSendInvoice } from './invoices'
 import { mirrorMaintenanceJson } from './maintenanceMirror'
@@ -279,17 +279,7 @@ export async function suspendWebsiteForNonpayment(
 
   const contact = await resolveBillingContact(env, site)
   const support = env.SUPPORT_EMAIL || 'nic@blacnova.net'
-  const text = [
-    `Website offline for nonpayment`,
-    '',
-    `Client: ${site.name} (${site.domain})`,
-    `Reason: ${MISS_THRESHOLD}+ past-due monthly invoices.`,
-    '',
-    'Pay outstanding invoices at https://dashboard.blacnova.net/billing',
-    'Then contact nic@blacnova.net to restore the site.',
-  ].join('\n')
-
-  const html = `<p>${text.replace(/\n/g, '<br>')}</p>`
+  const email = nonpaymentEmailContent({ siteName: site.name, domain: site.domain })
 
   const recipients: Array<{ email: string; name: string }> = []
   if (contact) recipients.push(contact)
@@ -312,9 +302,9 @@ export async function suspendWebsiteForNonpayment(
       await sendBrevoEmail(env, {
         toEmail: r.email,
         toName: r.name,
-        subject: `Action required: ${site.domain} offline for nonpayment`,
-        html,
-        text,
+        subject: email.subject,
+        html: email.html,
+        text: email.text,
       })
     } catch (err) {
       console.error(JSON.stringify({ billing_suspend_email_failed: String(err), to: r.email }))

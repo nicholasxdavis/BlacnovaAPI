@@ -16,7 +16,7 @@ import { clampString, clientIp, hasBrowserOrigin, isAllowedFormOrigin, isDisposa
 import { createSession, destroySession, getSessionUser } from './lib/session'
 import { handleAdmin } from './lib/adminRoutes'
 import { ingestBmcWebhook, verifyBmcSignature } from './lib/bmc'
-import { sendBrevoEmail } from './lib/brevo'
+import { sendBrevoEmail, supportTicketEmailContent } from './lib/brevo'
 import {
   enforceNonpaymentSuspensions,
   getClientBillingSummary,
@@ -432,25 +432,20 @@ async function handle(request: Request, env: Env): Promise<Response> {
     const supportTo = env.SUPPORT_EMAIL || 'nic@blacnova.net'
     const website = await getWebsite(env, websiteId)
     try {
-      const esc = (s: string) =>
-        s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      const email = supportTicketEmailContent({
+        userName: user.name,
+        userEmail: user.email,
+        websiteName: website?.name || 'Website',
+        websiteDomain: website?.domain || websiteId,
+        topic: body.topic,
+        message,
+      })
       await sendBrevoEmail(env, {
         toEmail: supportTo,
         toName: 'Blacnova Development',
-        subject: `Dashboard support — ${body.topic} — ${website?.name || websiteId}`,
-        text: [
-          `Support ticket from the client dashboard`,
-          '',
-          `From: ${user.name} <${user.email}>`,
-          `Website: ${website?.name || '—'} (${website?.domain || websiteId})`,
-          `Topic: ${body.topic}`,
-          '',
-          message,
-        ].join('\n'),
-        html: `<p>From: ${esc(user.name)} &lt;${esc(user.email)}&gt;</p>
-<p>Website: ${esc(website?.name || '—')} (${esc(website?.domain || websiteId)})</p>
-<p>Topic: ${esc(body.topic)}</p>
-<p>${esc(message).replace(/\n/g, '<br>')}</p>`,
+        subject: email.subject,
+        text: email.text,
+        html: email.html,
       })
     } catch (err) {
       console.error(JSON.stringify({ support_email_failed: String(err), ticketId }))
