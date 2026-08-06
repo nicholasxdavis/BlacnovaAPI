@@ -1,10 +1,16 @@
 import { parseModules } from './session'
-import { isPlatformUser } from './admin'
+import { isPlatformUser, withBillingModule } from './admin'
 import type { Env, SessionUser } from './types'
 
 export async function getWebsite(env: Env, websiteId: string) {
   const row = await env.DB.prepare(
-    `SELECT id, name, domain, status, modules, github_repo FROM websites WHERE id = ?`,
+    `SELECT id, name, domain, status, modules, github_repo,
+            COALESCE(monthly_fee_cents, 0) AS monthly_fee_cents,
+            billing_email, billing_name,
+            COALESCE(billing_enabled, 0) AS billing_enabled,
+            COALESCE(billing_suspended, 0) AS billing_suspended,
+            last_retainer_period
+     FROM websites WHERE id = ?`,
   )
     .bind(websiteId)
     .first<{
@@ -14,6 +20,12 @@ export async function getWebsite(env: Env, websiteId: string) {
       status: string
       modules: string
       github_repo: string | null
+      monthly_fee_cents: number
+      billing_email: string | null
+      billing_name: string | null
+      billing_enabled: number
+      billing_suspended: number
+      last_retainer_period: string | null
     }>()
 
   if (!row) return null
@@ -22,8 +34,14 @@ export async function getWebsite(env: Env, websiteId: string) {
     name: row.name,
     domain: row.domain,
     status: row.status as 'live' | 'maintenance' | 'offline',
-    modules: parseModules(row.modules),
+    modules: withBillingModule(parseModules(row.modules)),
     githubRepo: row.github_repo,
+    monthlyFeeCents: row.monthly_fee_cents,
+    billingEmail: row.billing_email,
+    billingName: row.billing_name,
+    billingEnabled: Boolean(row.billing_enabled),
+    billingSuspended: Boolean(row.billing_suspended),
+    lastRetainerPeriod: row.last_retainer_period,
   }
 }
 

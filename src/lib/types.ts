@@ -16,6 +16,8 @@ export interface Env {
   BREVO_SENDER_NAME?: string
   /** Agency support inbox for all client portals (default nic@blacnova.net) */
   SUPPORT_EMAIL?: string
+  /** Stripe webhook signing secret — `wrangler secret put STRIPE_WEBHOOK_SECRET` */
+  STRIPE_WEBHOOK_SECRET?: string
   /** Buy Me a Coffee webhook signing secret */
   BMC_WEBHOOK_SECRET?: string
   /** Optional personal access token for historical sync */
@@ -30,6 +32,7 @@ export type ModuleKey =
   | 'maintenance'
   | 'submissions'
   | 'analytics'
+  | 'billing'
   | 'settings'
 
 export interface SessionUser {

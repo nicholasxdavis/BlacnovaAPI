@@ -17,6 +17,15 @@ import { createSession, destroySession, getSessionUser } from './lib/session'
 import { handleAdmin } from './lib/adminRoutes'
 import { ingestBmcWebhook, verifyBmcSignature } from './lib/bmc'
 import { sendBrevoEmail } from './lib/brevo'
+import {
+  enforceNonpaymentSuspensions,
+  getClientBillingSummary,
+  processMonthlyRetainers,
+} from './lib/billing'
+import { listNotifications, markNotificationsRead } from './lib/notifications'
+import { listInvoicesForWebsite, processDueRecurringInvoices } from './lib/invoices'
+import { handleStripeWebhook } from './lib/stripeWebhook'
+import type { Env } from './lib/types'
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -46,18 +55,18 @@ export default {
 
   async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
     ctx.waitUntil(
-      processDueRecurringInvoices(env)
-        .then((result) => {
-          console.log(JSON.stringify({ cron: 'recurring_invoices', ...result }))
-        })
-        .catch((err) => {
-          console.error(
-            JSON.stringify({
-              cron: 'recurring_invoices',
-              err: String(err),
-            }),
-          )
-        }),
+      (async () => {
+        const recurring = await processDueRecurringInvoices(env)
+        console.log(JSON.stringify({ cron: 'recurring_invoices', ...recurring }))
+
+        const retainers = await processMonthlyRetainers(env)
+        console.log(JSON.stringify({ cron: 'monthly_retainers', ...retainers }))
+
+        const dunning = await enforceNonpaymentSuspensions(env)
+        console.log(JSON.stringify({ cron: 'billing_dunning', ...dunning }))
+      })().catch((err) => {
+        console.error(JSON.stringify({ cron: 'billing', err: String(err) }))
+      }),
     )
   },
 }
@@ -92,6 +101,10 @@ async function handle(request: Request, env: Env): Promise<Response> {
 
   if (path === '/v1/webhooks/buymeacoffee' && method === 'POST') {
     return handleBmcWebhook(request, env)
+  }
+
+  if (path === '/v1/webhooks/stripe' && method === 'POST') {
+    return handleStripeWebhook(request, env)
   }
 
   if (path.startsWith('/v1/media/') && path.endsWith('/file') && method === 'GET') {
@@ -459,6 +472,24 @@ async function handle(request: Request, env: Env): Promise<Response> {
 
   if (path === '/v1/dashboard' && method === 'GET') {
     return loadDashboard(request, env, websiteId)
+  }
+
+  if (path === '/v1/billing' && method === 'GET') {
+    const summary = await getClientBillingSummary(env, websiteId)
+    if (!summary) return error('Website not found', 404)
+    const invoices = await listInvoicesForWebsite(env, websiteId)
+    return json({ billing: summary, invoices })
+  }
+
+  if (path === '/v1/notifications' && method === 'GET') {
+    const notifications = await listNotifications(env, websiteId)
+    return json({ notifications })
+  }
+
+  if (path === '/v1/notifications/read' && method === 'POST') {
+    const body = (await request.json().catch(() => ({}))) as { ids?: string[] }
+    await markNotificationsRead(env, websiteId, body.ids)
+    return json({ ok: true })
   }
 
   void token

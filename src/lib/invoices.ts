@@ -1,4 +1,5 @@
 import { invoiceEmailContent, sendBrevoEmail } from './brevo'
+import { createNotification } from './notifications'
 import { id, nowIso, today } from './http'
 import { createAndFinalizeInvoice, centsToUsd, voidStripeInvoice } from './stripe'
 import type { Env } from './types'
@@ -12,6 +13,8 @@ export interface InvoiceDraft {
   daysUntilDue?: number
   websiteId?: string | null
   recurringId?: string | null
+  kind?: 'adhoc' | 'retainer'
+  billingPeriod?: string | null
 }
 
 export interface InvoiceRecord {
@@ -29,6 +32,10 @@ export interface InvoiceRecord {
   invoicePdf: string | null
   recurringId: string | null
   daysUntilDue: number
+  kind: string
+  billingPeriod: string | null
+  paidAt: string | null
+  dueAt: string | null
   sentAt: string | null
   error: string | null
   createdAt: string
@@ -52,6 +59,10 @@ function mapInvoiceRow(row: {
   invoice_pdf: string | null
   recurring_id: string | null
   days_until_due: number
+  kind?: string | null
+  billing_period?: string | null
+  paid_at?: string | null
+  due_at?: string | null
   sent_at: string | null
   error: string | null
   created_at: string
@@ -73,6 +84,10 @@ function mapInvoiceRow(row: {
     invoicePdf: row.invoice_pdf,
     recurringId: row.recurring_id,
     daysUntilDue: row.days_until_due,
+    kind: row.kind || 'adhoc',
+    billingPeriod: row.billing_period ?? null,
+    paidAt: row.paid_at ?? null,
+    dueAt: row.due_at ?? null,
     sentAt: row.sent_at,
     error: row.error,
     createdAt: row.created_at,
@@ -91,6 +106,25 @@ export async function listInvoices(env: Env, limit = 50): Promise<InvoiceRecord[
      LIMIT ?`,
   )
     .bind(Math.min(Math.max(limit, 1), 100))
+    .all<Parameters<typeof mapInvoiceRow>[0]>()
+
+  return (results || []).map(mapInvoiceRow)
+}
+
+export async function listInvoicesForWebsite(
+  env: Env,
+  websiteId: string,
+  limit = 50,
+): Promise<InvoiceRecord[]> {
+  const { results } = await env.DB.prepare(
+    `SELECT i.*, w.name AS website_name, w.domain AS website_domain
+     FROM invoices i
+     LEFT JOIN websites w ON w.id = i.website_id
+     WHERE i.website_id = ?
+     ORDER BY i.created_at DESC
+     LIMIT ?`,
+  )
+    .bind(websiteId, Math.min(Math.max(limit, 1), 100))
     .all<Parameters<typeof mapInvoiceRow>[0]>()
 
   return (results || []).map(mapInvoiceRow)
@@ -117,17 +151,25 @@ export async function deleteInvoiceRecord(env: Env, invoiceId: string): Promise<
   return true
 }
 
+function dueAtIso(daysUntilDue: number): string {
+  const d = new Date()
+  d.setUTCDate(d.getUTCDate() + daysUntilDue)
+  return d.toISOString()
+}
+
 export async function createAndSendInvoice(env: Env, draft: InvoiceDraft): Promise<InvoiceRecord> {
   const currency = (draft.currency || 'usd').toLowerCase()
   const daysUntilDue = Math.min(Math.max(draft.daysUntilDue ?? 14, 1), 90)
+  const kind = draft.kind || 'adhoc'
   const localId = id('inv')
   const createdAt = nowIso()
+  const dueAt = dueAtIso(daysUntilDue)
 
   await env.DB.prepare(
     `INSERT INTO invoices
       (id, website_id, customer_email, customer_name, amount_cents, currency, description,
-       status, recurring_id, days_until_due, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)`,
+       status, recurring_id, days_until_due, kind, billing_period, due_at, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?)`,
   )
     .bind(
       localId,
@@ -139,6 +181,9 @@ export async function createAndSendInvoice(env: Env, draft: InvoiceDraft): Promi
       draft.description,
       draft.recurringId || null,
       daysUntilDue,
+      kind,
+      draft.billingPeriod || null,
+      dueAt,
       createdAt,
     )
     .run()
@@ -155,6 +200,8 @@ export async function createAndSendInvoice(env: Env, draft: InvoiceDraft): Promi
         blacnova_invoice_id: localId,
         website_id: draft.websiteId || '',
         recurring_id: draft.recurringId || '',
+        kind,
+        billing_period: draft.billingPeriod || '',
       },
     })
 
@@ -200,6 +247,21 @@ export async function createAndSendInvoice(env: Env, draft: InvoiceDraft): Promi
       )
       .run()
 
+    // Linked portal clients also get an in-app notification.
+    if (draft.websiteId) {
+      try {
+        await createNotification(env, {
+          websiteId: draft.websiteId,
+          type: 'invoice',
+          title: `Invoice ready - ${amountFormatted}`,
+          body: draft.description,
+          link: '/billing',
+        })
+      } catch (err) {
+        console.error(JSON.stringify({ invoice_notify_failed: String(err) }))
+      }
+    }
+
     return {
       id: localId,
       websiteId: draft.websiteId || null,
@@ -215,6 +277,10 @@ export async function createAndSendInvoice(env: Env, draft: InvoiceDraft): Promi
       invoicePdf: stripe.invoicePdf,
       recurringId: draft.recurringId || null,
       daysUntilDue,
+      kind,
+      billingPeriod: draft.billingPeriod || null,
+      paidAt: null,
+      dueAt,
       sentAt,
       error: null,
       createdAt,
@@ -280,6 +346,7 @@ export async function processDueRecurringInvoices(env: Env): Promise<{
         daysUntilDue: row.days_until_due,
         websiteId: row.website_id,
         recurringId: row.id,
+        kind: 'adhoc',
       })
       await env.DB.prepare(
         `UPDATE recurring_invoices SET last_sent_on = ?, updated_at = ? WHERE id = ?`,

@@ -1,5 +1,6 @@
 import { hashPassword } from './auth'
-import { DEFAULT_CLIENT_MODULES, isPlatformUser } from './admin'
+import { DEFAULT_CLIENT_MODULES, isPlatformUser, withBillingModule } from './admin'
+import { restoreWebsiteBilling } from './billing'
 import { error, id, json, nowIso, today } from './http'
 import { createAndSendInvoice, deleteInvoiceRecord, listInvoices } from './invoices'
 import { getBmcOverview, syncBmcFromApi } from './bmc'
@@ -13,7 +14,9 @@ const WEBSITE_STATUSES = new Set(['live', 'maintenance', 'offline'])
 function parseModules(raw: string): string[] {
   try {
     const parsed = JSON.parse(raw)
-    return Array.isArray(parsed) ? parsed.map(String) : [...DEFAULT_CLIENT_MODULES]
+    return Array.isArray(parsed)
+      ? withBillingModule(parsed.map(String))
+      : [...DEFAULT_CLIENT_MODULES]
   } catch {
     return [...DEFAULT_CLIENT_MODULES]
   }
@@ -95,6 +98,12 @@ export async function handleAdmin(
       updated_at: string
       account_count: number
       new_submissions: number
+      monthly_fee_cents?: number
+      billing_email?: string | null
+      billing_name?: string | null
+      billing_enabled?: number
+      billing_suspended?: number
+      last_retainer_period?: string | null
     }>()
 
     return json({
@@ -107,6 +116,12 @@ export async function handleAdmin(
         githubRepo: w.github_repo,
         accountCount: Number(w.account_count) || 0,
         newSubmissions: Number(w.new_submissions) || 0,
+        monthlyFeeCents: Number(w.monthly_fee_cents) || 0,
+        billingEmail: w.billing_email || null,
+        billingName: w.billing_name || null,
+        billingEnabled: Boolean(w.billing_enabled),
+        billingSuspended: Boolean(w.billing_suspended),
+        lastRetainerPeriod: w.last_retainer_period || null,
         createdAt: w.created_at,
         updatedAt: w.updated_at,
       })),
@@ -147,13 +162,25 @@ export async function handleAdmin(
   }
 
   if (path.startsWith('/v1/admin/clients/') && method === 'PATCH') {
-    const clientId = path.slice('/v1/admin/clients/'.length)
+    const rest = path.slice('/v1/admin/clients/'.length)
+    if (rest.endsWith('/restore-billing') && rest.split('/').length === 2) {
+      const clientId = rest.split('/')[0]
+      const ok = await restoreWebsiteBilling(env, clientId)
+      if (!ok) return error('Client not found', 404)
+      return json({ ok: true })
+    }
+
+    const clientId = rest
     const body = (await request.json()) as {
       name?: string
       domain?: string
       status?: string
       githubRepo?: string | null
       modules?: string[]
+      monthlyFeeCents?: number
+      billingEmail?: string | null
+      billingName?: string | null
+      billingEnabled?: boolean
     }
     const existing = await env.DB.prepare(`SELECT id FROM websites WHERE id = ?`)
       .bind(clientId)
@@ -173,6 +200,23 @@ export async function handleAdmin(
       return error('Status must be live, maintenance, or offline')
     }
 
+    if (body.monthlyFeeCents !== undefined) {
+      const cents = Math.round(Number(body.monthlyFeeCents))
+      if (!Number.isFinite(cents) || cents < 0) return error('monthlyFeeCents must be >= 0')
+      if (body.billingEnabled && cents > 0 && cents < 50) {
+        return error('Monthly fee must be at least $0.50 when billing is enabled')
+      }
+    }
+
+    if (body.billingEmail) {
+      const email = clampString(body.billingEmail, 254).toLowerCase()
+      if (!isValidEmail(email)) return error('billingEmail is invalid')
+    }
+
+    const modulesJson = body.modules
+      ? JSON.stringify(withBillingModule(body.modules.map(String)))
+      : null
+
     await env.DB.prepare(
       `UPDATE websites SET
         name = COALESCE(?, name),
@@ -180,6 +224,10 @@ export async function handleAdmin(
         status = COALESCE(?, status),
         github_repo = CASE WHEN ? = 1 THEN ? ELSE github_repo END,
         modules = COALESCE(?, modules),
+        monthly_fee_cents = COALESCE(?, monthly_fee_cents),
+        billing_email = CASE WHEN ? = 1 THEN ? ELSE billing_email END,
+        billing_name = CASE WHEN ? = 1 THEN ? ELSE billing_name END,
+        billing_enabled = COALESCE(?, billing_enabled),
         updated_at = ?
        WHERE id = ?`,
     )
@@ -189,7 +237,15 @@ export async function handleAdmin(
         body.status !== undefined ? body.status : null,
         body.githubRepo !== undefined ? 1 : 0,
         body.githubRepo !== undefined ? clampString(String(body.githubRepo || ''), 200) || null : null,
-        body.modules ? JSON.stringify(body.modules) : null,
+        modulesJson,
+        body.monthlyFeeCents !== undefined ? Math.round(Number(body.monthlyFeeCents)) : null,
+        body.billingEmail !== undefined ? 1 : 0,
+        body.billingEmail !== undefined
+          ? clampString(String(body.billingEmail || ''), 254).toLowerCase() || null
+          : null,
+        body.billingName !== undefined ? 1 : 0,
+        body.billingName !== undefined ? clampString(String(body.billingName || ''), 120) || null : null,
+        body.billingEnabled !== undefined ? (body.billingEnabled ? 1 : 0) : null,
         nowIso(),
         clientId,
       )
@@ -217,6 +273,7 @@ export async function handleAdmin(
       env.DB.prepare(`DELETE FROM submissions WHERE website_id = ?`).bind(clientId),
       env.DB.prepare(`DELETE FROM analytics_points WHERE website_id = ?`).bind(clientId),
       env.DB.prepare(`DELETE FROM support_tickets WHERE website_id = ?`).bind(clientId),
+      env.DB.prepare(`DELETE FROM notifications WHERE website_id = ?`).bind(clientId),
       env.DB.prepare(`DELETE FROM websites WHERE id = ?`).bind(clientId),
     ])
     return json({ ok: true })
