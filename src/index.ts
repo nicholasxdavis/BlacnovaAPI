@@ -833,7 +833,7 @@ async function uploadMedia(request: Request, env: Env, websiteId: string, actorE
       usedOn,
       contentType,
       publicUrl,
-      today(),
+      nowIso(),
     )
     .run()
 
@@ -898,7 +898,7 @@ async function replaceMedia(
       .bind(
         formatBytes(bytes.byteLength),
         contentType,
-        today(),
+        nowIso(),
         publicUrl,
         name ?? null,
         type ?? null,
@@ -910,7 +910,7 @@ async function replaceMedia(
     await env.DB.prepare(
       `UPDATE media_items SET updated_at = ?, name = COALESCE(?, name), type = COALESCE(?, type), used_on = COALESCE(?, used_on) WHERE id = ?`,
     )
-      .bind(today(), name ?? null, type ?? null, usedOn ?? null, mediaId)
+      .bind(nowIso(), name ?? null, type ?? null, usedOn ?? null, mediaId)
       .run()
   }
 

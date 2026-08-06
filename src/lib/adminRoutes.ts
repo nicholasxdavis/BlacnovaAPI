@@ -66,7 +66,7 @@ async function seedWebsiteDefaults(env: Env, websiteId: string, name: string) {
     `INSERT INTO media_items (id, website_id, name, type, size, used_on, updated_at, url)
      VALUES (?, ?, 'placeholder.png', 'image', '—', 'Home · Hero', ?, NULL)`,
   )
-    .bind(id('m'), websiteId, today())
+    .bind(id('m'), websiteId, nowIso())
     .run()
 }
 
