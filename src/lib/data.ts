@@ -1,5 +1,6 @@
 import { parseModules } from './session'
-import { isPlatformUser, withBillingModule } from './admin'
+import { isFinanceOwner, isPlatformUser, withBillingModule } from './admin'
+import { supportEmail } from './config'
 import type { Env, SessionUser } from './types'
 
 export async function getWebsite(env: Env, websiteId: string) {
@@ -63,12 +64,13 @@ export async function getUserProfile(env: Env, user: SessionUser) {
       name: user.name,
       role: user.role,
       isPlatform: isPlatformUser(user),
+      canAccessFinance: isFinanceOwner(user, env),
     },
     preferences: {
       submissions: Boolean(row?.notify_submissions ?? 1),
       maintenance: Boolean(row?.notify_maintenance ?? 1),
     },
-    supportEmail: env.SUPPORT_EMAIL || 'nic@blacnova.net',
+    supportEmail: supportEmail(env),
     website,
   }
 }

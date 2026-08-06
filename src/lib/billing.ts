@@ -1,4 +1,5 @@
 import { nonpaymentEmailContent, sendBrevoEmail } from './brevo'
+import { supportEmail } from './config'
 import { nowIso } from './http'
 import { createAndSendInvoice } from './invoices'
 import { mirrorMaintenanceJson } from './maintenanceMirror'
@@ -219,10 +220,11 @@ export async function suspendWebsiteForNonpayment(
 ): Promise<void> {
   if (site.billing_suspended) return
 
+  const contactAddr = supportEmail(env)
   const title = 'Website paused - payment required'
   const message =
     'This site is offline because two or more monthly invoices are past due. ' +
-    'Pay outstanding invoices from your Blacnova dashboard (Billing), then contact nic@blacnova.net to restore the site.'
+    `Pay outstanding invoices from your Blacnova dashboard (Billing), then contact ${contactAddr || 'Blacnova'} to restore the site.`
 
   const maint = await env.DB.prepare(`SELECT website_id FROM maintenance WHERE website_id = ?`)
     .bind(site.id)
@@ -278,12 +280,15 @@ export async function suspendWebsiteForNonpayment(
   })
 
   const contact = await resolveBillingContact(env, site)
-  const support = env.SUPPORT_EMAIL || 'nic@blacnova.net'
-  const email = nonpaymentEmailContent({ siteName: site.name, domain: site.domain })
+  const support = supportEmail(env)
+  const email = nonpaymentEmailContent(
+    { siteName: site.name, domain: site.domain },
+    support || undefined,
+  )
 
   const recipients: Array<{ email: string; name: string }> = []
   if (contact) recipients.push(contact)
-  recipients.push({ email: support, name: 'Blacnova' })
+  if (support) recipients.push({ email: support, name: 'Blacnova' })
 
   const users = await env.DB.prepare(
     `SELECT email, name FROM users WHERE website_id = ? AND COALESCE(active, 1) = 1`,

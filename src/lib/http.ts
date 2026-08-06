@@ -2,8 +2,6 @@ import type { Env } from './types'
 
 const ALLOWED_DEFAULT = [
   'https://dashboard.blacnova.net',
-  'http://localhost:5173',
-  'http://127.0.0.1:5173',
   'https://www.blacnova.net',
   'https://blacnova.net',
 ]

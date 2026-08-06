@@ -14,8 +14,10 @@ export interface Env {
   BREVO_API_KEY: string
   BREVO_SENDER_EMAIL?: string
   BREVO_SENDER_NAME?: string
-  /** Agency support inbox for all client portals (default nic@blacnova.net) */
+  /** Agency support inbox — wrangler secret or var */
   SUPPORT_EMAIL?: string
+  /** Only this email may access Stripe balance + BMC Finance */
+  FINANCE_OWNER_EMAIL?: string
   /** Stripe webhook signing secret — `wrangler secret put STRIPE_WEBHOOK_SECRET` */
   STRIPE_WEBHOOK_SECRET?: string
   /** Buy Me a Coffee webhook signing secret */

@@ -1,7 +1,11 @@
 /**
- * Seeds D1 with Blacnova website + nic@blacnova.net account.
- * Run: npx wrangler d1 execute blacnova-db --remote --file=./migrations/0002_seed.sql
- * after generating the SQL via: node scripts/generate-seed.mjs
+ * Seeds D1 with the primary website + owner account.
+ * Requires env:
+ *   SEED_OWNER_EMAIL
+ *   SEED_OWNER_PASSWORD  (min 12 chars)
+ *   SEED_OWNER_NAME      (optional)
+ * Run: node scripts/generate-seed.mjs
+ * then: npx wrangler d1 execute blacnova-db --remote --file=./migrations/0002_seed.sql
  */
 import { writeFileSync } from 'node:fs'
 import { resolve, dirname } from 'node:path'
@@ -148,10 +152,25 @@ const analytics = [
   ['2026-08-03', 1088, 2712, 7],
 ]
 
-const passwordHash = await hashPassword('2900')
+const ownerEmail = String(process.env.SEED_OWNER_EMAIL || '')
+  .trim()
+  .toLowerCase()
+const ownerPassword = String(process.env.SEED_OWNER_PASSWORD || '')
+const ownerName = String(process.env.SEED_OWNER_NAME || 'Owner').trim() || 'Owner'
+
+if (!ownerEmail || !ownerEmail.includes('@')) {
+  console.error('Set SEED_OWNER_EMAIL to a valid email before generating seed SQL.')
+  process.exit(1)
+}
+if (ownerPassword.length < 12) {
+  console.error('Set SEED_OWNER_PASSWORD to at least 12 characters.')
+  process.exit(1)
+}
+
+const passwordHash = await hashPassword(ownerPassword)
 
 const lines = []
-lines.push('-- Seed Blacnova owner account + www.blacnova.net')
+lines.push('-- Seed primary website + owner account (generated; do not commit secrets)')
 lines.push(`DELETE FROM support_tickets;`)
 lines.push(`DELETE FROM analytics_points;`)
 lines.push(`DELETE FROM submissions;`)
@@ -173,8 +192,8 @@ lines.push(`INSERT INTO websites (id, name, domain, status, modules, github_repo
 
 lines.push(`INSERT INTO users (id, email, name, role, password_hash, website_id) VALUES (
   '${userId}',
-  'nic@blacnova.net',
-  'Nic Davis',
+  '${esc(ownerEmail)}',
+  '${esc(ownerName)}',
   'owner',
   '${esc(passwordHash)}',
   '${websiteId}'
@@ -202,7 +221,7 @@ lines.push(`INSERT INTO maintenance (website_id, enabled, title, message, expect
   '${websiteId}',
   0,
   'We''ll be right back',
-  'Blacnova Development is temporarily offline for improvements. Please check back soon or email nic@blacnova.net.',
+  'Blacnova Development is temporarily offline for improvements. Please check back soon.',
   ''
 );`)
 
@@ -221,4 +240,4 @@ analytics.forEach(([date, visitors, pageviews, subs], i) => {
 const out = resolve(__dirname, '../migrations/0002_seed.sql')
 writeFileSync(out, lines.join('\n') + '\n')
 console.log('Wrote', out)
-console.log('Password hash ready for nic@blacnova.net')
+console.log('Owner seed SQL generated (email/password not logged).')

@@ -1,22 +1,22 @@
-import type { SessionUser } from './types'
+import type { Env, SessionUser } from './types'
 import { error } from './http'
+import { isFinanceOwner as isFinanceOwnerEmail } from './config'
 
 export function isPlatformUser(user: SessionUser): boolean {
   return user.role === 'platform' || user.role === 'owner'
 }
 
 export function requirePlatform(user: SessionUser): Response | null {
-  if (!isPlatformUser(user)) return error('Forbidden - platform admin only', 403)
+  if (!isPlatformUser(user)) return error('Forbidden', 403)
   return null
 }
 
-/** Stripe balance + BMC Finance — Nic only. */
-export function isFinanceOwner(user: SessionUser): boolean {
-  return user.email.toLowerCase() === 'nic@blacnova.net'
+export function isFinanceOwner(user: SessionUser, env: Env): boolean {
+  return isFinanceOwnerEmail(user, env)
 }
 
-export function requireFinanceOwner(user: SessionUser): Response | null {
-  if (!isFinanceOwner(user)) return error('Forbidden - finance access only', 403)
+export function requireFinanceOwner(user: SessionUser, env: Env): Response | null {
+  if (!isFinanceOwner(user, env)) return error('Forbidden', 403)
   return null
 }
 

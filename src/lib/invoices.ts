@@ -1,4 +1,5 @@
 import { invoiceEmailContent, sendBrevoEmail } from './brevo'
+import { supportEmail } from './config'
 import { createNotification } from './notifications'
 import { id, nowIso, today } from './http'
 import { createAndFinalizeInvoice, centsToUsd, voidStripeInvoice } from './stripe'
@@ -229,13 +230,16 @@ export async function createAndSendInvoice(env: Env, draft: InvoiceDraft): Promi
     const dueLabel =
       daysUntilDue === 1 ? 'in 1 day' : `in ${daysUntilDue} days`
     const amountFormatted = centsToUsd(draft.amountCents, currency)
-    const email = invoiceEmailContent({
-      customerName: draft.customerName,
-      amountFormatted,
-      description: draft.description,
-      payUrl: stripe.hostedInvoiceUrl,
-      dueLabel,
-    })
+    const email = invoiceEmailContent(
+      {
+        customerName: draft.customerName,
+        amountFormatted,
+        description: draft.description,
+        payUrl: stripe.hostedInvoiceUrl,
+        dueLabel,
+      },
+      supportEmail(env) || undefined,
+    )
 
     let emailError: string | null = null
     try {

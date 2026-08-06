@@ -26,12 +26,10 @@
     }
   ],
   "vars": {
-    "CORS_ORIGINS": "https://dashboard.blacnova.net,http://localhost:5173,http://127.0.0.1:5173,https://www.blacnova.net,https://blacnova.net",
+    "CORS_ORIGINS": "https://dashboard.blacnova.net,https://www.blacnova.net,https://blacnova.net",
     "GITHUB_REPO": "nicholasxdavis/BlacnovaWebsite",
     "GITHUB_BRANCH": "main",
-    "BREVO_SENDER_EMAIL": "nic@blacnova.net",
-    "BREVO_SENDER_NAME": "Blacnova Development",
-    "SUPPORT_EMAIL": "nic@blacnova.net"
+    "BREVO_SENDER_NAME": "Blacnova Development"
   },
   "triggers": {
     "crons": ["0 15 * * *"]

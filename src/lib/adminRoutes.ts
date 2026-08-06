@@ -1,5 +1,6 @@
 import { hashPassword } from './auth'
-import { DEFAULT_CLIENT_MODULES, isPlatformUser, requireFinanceOwner, withBillingModule } from './admin'
+import { DEFAULT_CLIENT_MODULES, isFinanceOwner, isPlatformUser, requireFinanceOwner, withBillingModule } from './admin'
+import { assertPasswordPolicy } from './config'
 import { createRetainerInvoice, loadWebsiteBilling, periodKey, restoreWebsiteBilling } from './billing'
 import { error, id, json, nowIso, today } from './http'
 import { createAndSendInvoice, deleteInvoiceRecord, listInvoices } from './invoices'
@@ -355,13 +356,22 @@ export async function handleAdmin(
     const name = clampString(body.name, 120)
     const password = String(body.password || '')
     const websiteId = clampString(body.websiteId, 64)
-    const role = body.role === 'platform' ? 'platform' : 'manager'
+    const role =
+      body.role === 'platform'
+        ? isFinanceOwner(user, env)
+          ? 'platform'
+          : 'manager'
+        : 'manager'
 
     if (!email || !name || !password || !websiteId) {
       return error('email, name, password, and websiteId are required')
     }
     if (!isValidEmail(email)) return error('A valid email is required')
-    if (password.length < 4) return error('Password must be at least 4 characters')
+    const passwordError = assertPasswordPolicy(password)
+    if (passwordError) return error(passwordError)
+    if (body.role === 'platform' && !isFinanceOwner(user, env)) {
+      return error('Forbidden', 403)
+    }
 
     const website = await env.DB.prepare(`SELECT id FROM websites WHERE id = ?`)
       .bind(websiteId)
@@ -387,7 +397,8 @@ export async function handleAdmin(
     const accountId = path.split('/')[4]
     const body = (await request.json()) as { password?: string }
     const password = String(body.password || '')
-    if (password.length < 4) return error('Password must be at least 4 characters')
+    const passwordError = assertPasswordPolicy(password)
+    if (passwordError) return error(passwordError)
 
     const existing = await env.DB.prepare(`SELECT id FROM users WHERE id = ?`)
       .bind(accountId)
@@ -470,32 +481,34 @@ export async function handleAdmin(
 
   // --- Billing (Stripe) — Nic only ---
   if (path === '/v1/admin/billing' && method === 'GET') {
-    const denied = requireFinanceOwner(user)
+    const denied = requireFinanceOwner(user, env)
     if (denied) return denied
     try {
       const billing = await getBillingOverview(env)
       return json(billing)
     } catch (err) {
-      return error(err instanceof Error ? err.message : 'Stripe billing unavailable', 502)
+      console.error(JSON.stringify({ err: 'billing_overview', detail: String(err) }))
+      return error('Stripe billing unavailable', 502)
     }
   }
 
-  // --- Buy Me a Coffee — Nic only ---
+  // --- Buy Me a Coffee — finance owner only ---
   if (path === '/v1/admin/bmc' && method === 'GET') {
-    const denied = requireFinanceOwner(user)
+    const denied = requireFinanceOwner(user, env)
     if (denied) return denied
     return json(await getBmcOverview(env))
   }
 
   if (path === '/v1/admin/bmc/sync' && method === 'POST') {
-    const denied = requireFinanceOwner(user)
+    const denied = requireFinanceOwner(user, env)
     if (denied) return denied
     try {
       const result = await syncBmcFromApi(env)
       const overview = await getBmcOverview(env)
       return json({ ...result, ...overview })
     } catch (err) {
-      return error(err instanceof Error ? err.message : 'BMC sync failed', 502)
+      console.error(JSON.stringify({ err: 'bmc_sync', detail: String(err) }))
+      return error('BMC sync failed', 502)
     }
   }
 
@@ -551,7 +564,7 @@ export async function handleAdmin(
       })
       return json({ invoice }, 201)
     } catch (err) {
-      return error(err instanceof Error ? err.message : 'Could not send invoice', 502)
+      return error('Could not send invoice', 502)
     }
   }
 
@@ -782,7 +795,7 @@ export async function handleAdmin(
         .run()
       return json({ invoice })
     } catch (err) {
-      return error(err instanceof Error ? err.message : 'Could not send invoice', 502)
+      return error('Could not send invoice', 502)
     }
   }
 

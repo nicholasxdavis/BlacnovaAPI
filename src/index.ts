@@ -13,10 +13,15 @@ import { GitHubError } from './lib/github'
 import { corsHeaders, error, formatBytes, id, json, nowIso, today } from './lib/http'
 import { publishMediaToGitHub, publishWebsiteContent } from './lib/publish'
 import { clampString, clientIp, hasBrowserOrigin, isAllowedFormOrigin, isDisposableEmail, isValidEmail, rateLimit, submissionLooksLikeSpam } from './lib/security'
-import { createSession, destroySession, getSessionUser } from './lib/session'
+import { createSession, destroySession, getSessionUser, revokeUserSessions } from './lib/session'
 import { handleAdmin } from './lib/adminRoutes'
 import { ingestBmcWebhook, verifyBmcSignature } from './lib/bmc'
 import { sendBrevoEmail, supportTicketEmailContent } from './lib/brevo'
+import {
+  assertPasswordPolicy,
+  DUMMY_PASSWORD_HASH,
+  supportEmail,
+} from './lib/config'
 import {
   enforceNonpaymentSuspensions,
   getClientBillingSummary,
@@ -47,7 +52,8 @@ export default {
     } catch (err) {
       console.error(JSON.stringify({ err: String(err), stack: err instanceof Error ? err.stack : undefined }))
       if (err instanceof GitHubError) {
-        return error(err.message, err.status >= 400 && err.status < 600 ? err.status : 502, cors)
+        console.error(JSON.stringify({ err: 'github', status: err.status, detail: err.message }))
+        return error('Upstream publish failed', err.status >= 500 ? 502 : 400, cors)
       }
       return error('Internal server error', 500, cors)
     }
@@ -87,13 +93,11 @@ async function handle(request: Request, env: Env): Promise<Response> {
   const method = request.method
 
   if (path === '/' && method === 'GET') {
-    return json({
-      ok: true,
-      service: 'blacnova-api',
-      version: '1',
-      github: Boolean(env.GITHUB_TOKEN),
-      repo: env.GITHUB_REPO || null,
-    })
+    return json({ ok: true })
+  }
+
+  if (path === '/v1/public/meta' && method === 'GET') {
+    return json({ supportEmail: supportEmail(env) || null })
   }
 
   // --- Public ---
@@ -429,7 +433,8 @@ async function handle(request: Request, env: Env): Promise<Response> {
       .bind(ticketId, user.id, websiteId, body.topic, message)
       .run()
 
-    const supportTo = env.SUPPORT_EMAIL || 'nic@blacnova.net'
+    const supportTo = supportEmail(env)
+    if (!supportTo) return error('Support inbox is not configured', 503)
     const website = await getWebsite(env, websiteId)
     try {
       const email = supportTicketEmailContent({
@@ -496,10 +501,17 @@ async function handle(request: Request, env: Env): Promise<Response> {
 }
 
 async function login(request: Request, env: Env): Promise<Response> {
+  const ip = clientIp(request)
+  const ipOk = await rateLimit(env, `login:ip:${ip}`, 20, 60 * 15)
+  if (!ipOk) return error('Too many login attempts. Try again later.', 429)
+
   const body = (await request.json()) as { email?: string; password?: string }
   const email = (body.email || '').trim().toLowerCase()
   const password = body.password || ''
   if (!email || !password) return error('Email and password are required')
+
+  const emailOk = await rateLimit(env, `login:email:${email}`, 10, 60 * 15)
+  if (!emailOk) return error('Too many login attempts. Try again later.', 429)
 
   const row = await env.DB.prepare(
     `SELECT id, email, name, role, website_id, password_hash, COALESCE(active, 1) AS active FROM users WHERE email = ?`,
@@ -515,7 +527,9 @@ async function login(request: Request, env: Env): Promise<Response> {
       active: number
     }>()
 
-  if (!row || !(await verifyPassword(password, row.password_hash))) {
+  const hash = row?.password_hash || DUMMY_PASSWORD_HASH
+  const valid = await verifyPassword(password, hash)
+  if (!row || !valid) {
     return error('Invalid email or password', 401)
   }
   if (!row.active) return error('This account has been deactivated', 403)
@@ -547,9 +561,8 @@ async function changePassword(request: Request, env: Env, userId: string): Promi
   if (!body.currentPassword || !body.newPassword) {
     return error('Current and new password are required')
   }
-  if (body.newPassword.length < 4) {
-    return error('New password must be at least 4 characters')
-  }
+  const passwordError = assertPasswordPolicy(body.newPassword)
+  if (passwordError) return error(passwordError)
 
   const row = await env.DB.prepare(`SELECT password_hash FROM users WHERE id = ?`)
     .bind(userId)
@@ -562,7 +575,8 @@ async function changePassword(request: Request, env: Env, userId: string): Promi
   await env.DB.prepare(`UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?`)
     .bind(passwordHash, nowIso(), userId)
     .run()
-  return json({ ok: true })
+  await revokeUserSessions(env, userId)
+  return json({ ok: true, reauth: true })
 }
 
 async function publicRoutes(request: Request, env: Env, path: string): Promise<Response> {
@@ -620,7 +634,7 @@ async function publicRoutes(request: Request, env: Env, path: string): Promise<R
           message:
             maintenance?.message ||
             (forcedOffline
-              ? 'This site is temporarily offline. Please contact nic@blacnova.net.'
+              ? `This site is temporarily offline. Please contact ${supportEmail(env) || 'Blacnova'}.`
               : ''),
           expectedReturn: maintenance?.expected_return || '',
         }
@@ -964,12 +978,12 @@ async function handleBmcWebhook(request: Request, env: Env): Promise<Response> {
   const signature =
     request.headers.get('x-signature-sha256') || request.headers.get('x-bmc-signature')
 
-  if (env.BMC_WEBHOOK_SECRET) {
-    const valid = await verifyBmcSignature(rawBody, env.BMC_WEBHOOK_SECRET, signature)
-    if (!valid) return error('Invalid webhook signature', 401)
-  } else {
-    console.warn(JSON.stringify({ warn: 'BMC_WEBHOOK_SECRET not set — accepting unsigned webhook' }))
+  if (!env.BMC_WEBHOOK_SECRET) {
+    console.error(JSON.stringify({ err: 'BMC_WEBHOOK_SECRET not configured' }))
+    return error('Webhook not configured', 503)
   }
+  const valid = await verifyBmcSignature(rawBody, env.BMC_WEBHOOK_SECRET, signature)
+  if (!valid) return error('Invalid webhook signature', 401)
 
   // Legacy header event name if envelope lacks type
   let bodyForIngest = rawBody

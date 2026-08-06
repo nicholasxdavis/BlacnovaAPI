@@ -1,11 +1,14 @@
 import type { Env } from './types'
+import { supportEmail } from './config'
 
 const BREVO_API = 'https://api.brevo.com/v3'
 
 export function senderFromEnv(env: Env): { name: string; email: string } {
+  const email = supportEmail(env)
+  if (!email) throw new Error('BREVO_SENDER_EMAIL or SUPPORT_EMAIL is not configured')
   return {
     name: env.BREVO_SENDER_NAME || 'Blacnova Development',
-    email: env.BREVO_SENDER_EMAIL || 'nic@blacnova.net',
+    email,
   }
 }
 
@@ -60,9 +63,7 @@ export function brandedEmailHtml(opts: {
       ? `<a href="${escapeAttr(opts.ctaUrl)}" style="display:inline-block;background:#d4611c;color:#ffffff;text-decoration:none;padding:12px 20px;border-radius:999px;font-weight:500;font-size:14px;font-family:Poppins,Segoe UI,Helvetica,Arial,sans-serif;">${escapeHtml(opts.ctaLabel)}</a>`
       : ''
 
-  const footer =
-    opts.footerNote ||
-    'Questions? Reply to this email or contact nic@blacnova.net.'
+  const footer = opts.footerNote || 'Questions? Reply to this email or contact Blacnova Development.'
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -119,13 +120,17 @@ export function brandedEmailHtml(opts: {
 </html>`
 }
 
-export function invoiceEmailContent(opts: {
-  customerName: string
-  amountFormatted: string
-  description: string
-  payUrl: string
-  dueLabel: string
-}): { subject: string; html: string; text: string } {
+export function invoiceEmailContent(
+  opts: {
+    customerName: string
+    amountFormatted: string
+    description: string
+    payUrl: string
+    dueLabel: string
+  },
+  contactEmail?: string,
+): { subject: string; html: string; text: string } {
+  const contact = contactEmail || 'Blacnova Development'
   const subject = `Invoice from Blacnova Development - ${opts.amountFormatted}`
   const text = [
     `Hi ${opts.customerName},`,
@@ -140,7 +145,7 @@ export function invoiceEmailContent(opts: {
     '',
     'Thank you,',
     'Blacnova Development',
-    'nic@blacnova.net',
+    contact,
   ].join('\n')
 
   const bodyHtml = `
@@ -166,7 +171,7 @@ export function invoiceEmailContent(opts: {
     bodyHtml,
     ctaLabel: 'Pay invoice',
     ctaUrl: opts.payUrl,
-    footerNote: 'Questions? Reply to this email or contact nic@blacnova.net.',
+    footerNote: `Questions? Reply to this email or contact ${contact}.`,
   })
 
   return { subject, html, text }
@@ -211,10 +216,14 @@ export function supportTicketEmailContent(opts: {
   return { subject, html, text }
 }
 
-export function nonpaymentEmailContent(opts: {
-  siteName: string
-  domain: string
-}): { subject: string; html: string; text: string } {
+export function nonpaymentEmailContent(
+  opts: {
+    siteName: string
+    domain: string
+  },
+  contactEmail?: string,
+): { subject: string; html: string; text: string } {
+  const contact = contactEmail || 'Blacnova Development'
   const subject = `Action required: ${opts.domain} offline for nonpayment`
   const text = [
     `Website offline for nonpayment`,
@@ -223,19 +232,19 @@ export function nonpaymentEmailContent(opts: {
     `Reason: 2+ past-due monthly invoices.`,
     '',
     'Pay outstanding invoices at https://dashboard.blacnova.net/billing',
-    'Then contact nic@blacnova.net to restore the site.',
+    `Then contact ${contact} to restore the site.`,
   ].join('\n')
 
   const bodyHtml = `
     <p style="margin:0 0 16px;"><strong style="color:#000000;">${escapeHtml(opts.siteName)}</strong> (${escapeHtml(opts.domain)}) is offline because two or more monthly invoices are past due.</p>
-    <p style="margin:0 0 8px;">Pay open invoices from Billing in your dashboard, then email nic@blacnova.net to restore the site.</p>`
+    <p style="margin:0 0 8px;">Pay open invoices from Billing in your dashboard, then email ${escapeHtml(contact)} to restore the site.</p>`
 
   const html = brandedEmailHtml({
     title: 'Website offline for nonpayment',
     bodyHtml,
     ctaLabel: 'Open Billing',
     ctaUrl: 'https://dashboard.blacnova.net/billing',
-    footerNote: 'Blacnova Development - nic@blacnova.net',
+    footerNote: `Blacnova Development - ${contact}`,
   })
 
   return { subject, html, text }

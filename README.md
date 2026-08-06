@@ -13,7 +13,13 @@ Cloudflare Worker backend for the Blacnova client dashboard.
 ```bash
 npm install
 npm run db:setup
-npx wrangler secret put JWT_SECRET
+# Required secrets (never commit values):
+# GITHUB_TOKEN, STRIPE_SECRET_KEY, BREVO_API_KEY,
+# SUPPORT_EMAIL, FINANCE_OWNER_EMAIL, BREVO_SENDER_EMAIL,
+# BMC_WEBHOOK_SECRET, STRIPE_WEBHOOK_SECRET, BMC_ACCESS_TOKEN (optional)
+npx wrangler secret put SUPPORT_EMAIL
+npx wrangler secret put FINANCE_OWNER_EMAIL
+npx wrangler secret put BREVO_SENDER_EMAIL
 npm run deploy
 ```
 
@@ -24,9 +30,10 @@ npm run deploy
 - `GET /v1/auth/me`
 - `POST /v1/auth/password`
 
-Owner account: `nic@blacnova.net` (controls `www.blacnova.net`).
+Owner access is configured via `SUPPORT_EMAIL` / `FINANCE_OWNER_EMAIL` secrets (not hardcoded).
 
 ## Public
 
+- `GET /v1/public/meta` — support contact for auth UI
 - `GET /v1/public/:domain/site` — published content + maintenance
 - `POST /v1/public/submissions` — contact/quote form intake

@@ -18,7 +18,10 @@ function requireToken(env: Env): string {
 }
 
 function repo(env: Env): string {
-  return env.GITHUB_REPO || 'nicholasxdavis/BlacnovaWebsite'
+  if (!env.GITHUB_REPO) {
+    throw new GitHubError('GITHUB_REPO is not configured', 500)
+  }
+  return env.GITHUB_REPO
 }
 
 function headers(token: string): HeadersInit {
