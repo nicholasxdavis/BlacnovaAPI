@@ -56,17 +56,27 @@ export default {
   async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
     ctx.waitUntil(
       (async () => {
-        const recurring = await processDueRecurringInvoices(env)
-        console.log(JSON.stringify({ cron: 'recurring_invoices', ...recurring }))
+        try {
+          const recurring = await processDueRecurringInvoices(env)
+          console.log(JSON.stringify({ cron: 'recurring_invoices', ...recurring }))
+        } catch (err) {
+          console.error(JSON.stringify({ cron: 'recurring_invoices', err: String(err) }))
+        }
 
-        const retainers = await processMonthlyRetainers(env)
-        console.log(JSON.stringify({ cron: 'monthly_retainers', ...retainers }))
+        try {
+          const retainers = await processMonthlyRetainers(env)
+          console.log(JSON.stringify({ cron: 'monthly_retainers', ...retainers }))
+        } catch (err) {
+          console.error(JSON.stringify({ cron: 'monthly_retainers', err: String(err) }))
+        }
 
-        const dunning = await enforceNonpaymentSuspensions(env)
-        console.log(JSON.stringify({ cron: 'billing_dunning', ...dunning }))
-      })().catch((err) => {
-        console.error(JSON.stringify({ cron: 'billing', err: String(err) }))
-      }),
+        try {
+          const dunning = await enforceNonpaymentSuspensions(env)
+          console.log(JSON.stringify({ cron: 'billing_dunning', ...dunning }))
+        } catch (err) {
+          console.error(JSON.stringify({ cron: 'billing_dunning', err: String(err) }))
+        }
+      })(),
     )
   },
 }
@@ -263,20 +273,14 @@ async function handle(request: Request, env: Env): Promise<Response> {
     // Mirror to GitHub so static Pages can also read a fallback flag
     if (env.GITHUB_TOKEN) {
       try {
-        const { getFileSha, putRepoFile } = await import('./lib/github')
-        const payload = JSON.stringify(
-          { enabled, title, message, expectedReturn, updatedAt: nowIso() },
-          null,
-          2,
-        )
-        const sha = await getFileSha(env, 'maintenance.json')
-        await putRepoFile(
-          env,
-          'maintenance.json',
-          `${payload}\n`,
-          `Update maintenance mode (${enabled ? 'on' : 'off'}) via Blacnova Dashboard (${user.email})`,
-          sha,
-        )
+        const { mirrorMaintenanceJson } = await import('./lib/maintenanceMirror')
+        await mirrorMaintenanceJson(env, {
+          enabled,
+          title,
+          message,
+          expectedReturn,
+          reason: `dashboard ${user.email}`,
+        })
       } catch (err) {
         console.error('maintenance github mirror failed', String(err))
       }
@@ -607,14 +611,25 @@ async function publicRoutes(request: Request, env: Env, path: string): Promise<R
         domain: website.domain,
         status: website.status,
       },
-      maintenance: maintenance
-        ? {
-            enabled: Boolean(maintenance.enabled),
-            title: maintenance.title,
-            message: maintenance.message,
-            expectedReturn: maintenance.expected_return,
-          }
-        : null,
+      maintenance: (() => {
+        const forcedOffline =
+          website.status === 'offline' || website.status === 'maintenance'
+        if (!maintenance && !forcedOffline) {
+          return { enabled: false, title: '', message: '', expectedReturn: '' }
+        }
+        return {
+          enabled: Boolean(maintenance?.enabled) || forcedOffline,
+          title:
+            maintenance?.title ||
+            (forcedOffline ? 'Website paused - payment required' : "We'll be right back"),
+          message:
+            maintenance?.message ||
+            (forcedOffline
+              ? 'This site is temporarily offline. Please contact nic@blacnova.net.'
+              : ''),
+          expectedReturn: maintenance?.expected_return || '',
+        }
+      })(),
       content: (contentRows || []).map((r) => mapContent(r as never)),
       media: (mediaRows || []).map((m) => ({
         id: m.id,

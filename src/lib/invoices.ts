@@ -205,6 +205,27 @@ export async function createAndSendInvoice(env: Env, draft: InvoiceDraft): Promi
       },
     })
 
+    // Persist Stripe refs immediately so webhooks can reconcile even if email fails.
+    await env.DB.prepare(
+      `UPDATE invoices SET
+        status = ?,
+        stripe_invoice_id = ?,
+        stripe_customer_id = ?,
+        hosted_invoice_url = ?,
+        invoice_pdf = ?,
+        error = NULL
+       WHERE id = ?`,
+    )
+      .bind(
+        stripe.status || 'open',
+        stripe.invoiceId,
+        stripe.customerId,
+        stripe.hostedInvoiceUrl,
+        stripe.invoicePdf,
+        localId,
+      )
+      .run()
+
     const dueLabel =
       daysUntilDue === 1 ? 'in 1 day' : `in ${daysUntilDue} days`
     const amountFormatted = centsToUsd(draft.amountCents, currency)
@@ -216,35 +237,25 @@ export async function createAndSendInvoice(env: Env, draft: InvoiceDraft): Promi
       dueLabel,
     })
 
-    await sendBrevoEmail(env, {
-      toEmail: draft.customerEmail,
-      toName: draft.customerName,
-      subject: email.subject,
-      html: email.html,
-      text: email.text,
-    })
+    let emailError: string | null = null
+    try {
+      await sendBrevoEmail(env, {
+        toEmail: draft.customerEmail,
+        toName: draft.customerName,
+        subject: email.subject,
+        html: email.html,
+        text: email.text,
+      })
+    } catch (err) {
+      emailError = err instanceof Error ? err.message : 'Email failed'
+      console.error(JSON.stringify({ invoice_email_failed: emailError, invoiceId: localId }))
+    }
 
     const sentAt = nowIso()
     await env.DB.prepare(
-      `UPDATE invoices SET
-        status = ?,
-        stripe_invoice_id = ?,
-        stripe_customer_id = ?,
-        hosted_invoice_url = ?,
-        invoice_pdf = ?,
-        sent_at = ?,
-        error = NULL
-       WHERE id = ?`,
+      `UPDATE invoices SET sent_at = ?, error = ? WHERE id = ?`,
     )
-      .bind(
-        stripe.status || 'open',
-        stripe.invoiceId,
-        stripe.customerId,
-        stripe.hostedInvoiceUrl,
-        stripe.invoicePdf,
-        sentAt,
-        localId,
-      )
+      .bind(sentAt, emailError, localId)
       .run()
 
     // Linked portal clients also get an in-app notification.
@@ -282,7 +293,7 @@ export async function createAndSendInvoice(env: Env, draft: InvoiceDraft): Promi
       paidAt: null,
       dueAt,
       sentAt,
-      error: null,
+      error: emailError,
       createdAt,
       formatted: amountFormatted,
     }

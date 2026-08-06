@@ -30,25 +30,32 @@ export async function handleStripeWebhook(
 
   const event = JSON.parse(payload) as {
     type: string
-    data: { object: { id: string; status?: string; metadata?: Record<string, string> } }
+    data: {
+      object: {
+        id: string
+        status?: string
+        metadata?: Record<string, string>
+      }
+    }
   }
 
   const invoice = event.data.object
   const stripeId = invoice.id
+  const localId = invoice.metadata?.blacnova_invoice_id || undefined
 
   try {
     switch (event.type) {
       case 'invoice.paid':
-        await syncInvoiceStatus(env, stripeId, 'paid')
+        await syncInvoiceStatus(env, stripeId, 'paid', localId)
         break
       case 'invoice.voided':
-        await syncInvoiceStatus(env, stripeId, 'void')
+        await syncInvoiceStatus(env, stripeId, 'void', localId)
         break
       case 'invoice.marked_uncollectible':
-        await syncInvoiceStatus(env, stripeId, 'uncollectible')
+        await syncInvoiceStatus(env, stripeId, 'uncollectible', localId)
         break
       case 'invoice.payment_failed':
-        await syncInvoiceStatus(env, stripeId, invoice.status || 'open')
+        await syncInvoiceStatus(env, stripeId, invoice.status || 'open', localId)
         break
       default:
         break
@@ -72,16 +79,18 @@ async function verifyStripeSignature(
   header: string,
   secret: string,
 ): Promise<boolean> {
-  const parts = Object.fromEntries(
-    header.split(',').map((p) => {
-      const [k, v] = p.split('=')
-      return [k, v]
-    }),
-  ) as { t?: string; v1?: string }
+  const entries = header.split(',').map((p) => {
+    const i = p.indexOf('=')
+    return i === -1 ? ['', ''] : [p.slice(0, i), p.slice(i + 1)]
+  })
+  const timestamp = entries.find(([k]) => k === 't')?.[1]
+  const signatures = entries.filter(([k]) => k === 'v1').map(([, v]) => v)
+  if (!timestamp || !signatures.length) return false
 
-  if (!parts.t || !parts.v1) return false
+  const age = Math.abs(Math.floor(Date.now() / 1000) - Number(timestamp))
+  if (!Number.isFinite(age) || age > 300) return false
 
-  const signed = `${parts.t}.${payload}`
+  const signed = `${timestamp}.${payload}`
   const key = await crypto.subtle.importKey(
     'raw',
     new TextEncoder().encode(secret),
@@ -92,10 +101,7 @@ async function verifyStripeSignature(
   const sig = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(signed))
   const hex = [...new Uint8Array(sig)].map((b) => b.toString(16).padStart(2, '0')).join('')
 
-  const age = Math.abs(Math.floor(Date.now() / 1000) - Number(parts.t))
-  if (age > 300) return false
-
-  return timingSafeEqual(hex, parts.v1)
+  return signatures.some((v1) => timingSafeEqual(hex, v1))
 }
 
 function timingSafeEqual(a: string, b: string): boolean {

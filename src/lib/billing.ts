@@ -1,14 +1,13 @@
 import { sendBrevoEmail } from './brevo'
-import { nowIso, today } from './http'
+import { nowIso } from './http'
 import { createAndSendInvoice } from './invoices'
+import { mirrorMaintenanceJson } from './maintenanceMirror'
 import { createNotification } from './notifications'
 import { centsToUsd } from './stripe'
 import type { Env } from './types'
 
 const RETAINER_DAYS_UNTIL_DUE = 14
 const MISS_THRESHOLD = 2
-
-export type InvoiceKind = 'adhoc' | 'retainer'
 
 export interface WebsiteBillingRow {
   id: string
@@ -24,7 +23,7 @@ export interface WebsiteBillingRow {
   github_repo: string | null
 }
 
-function periodKey(date = new Date()): string {
+export function periodKey(date = new Date()): string {
   const y = date.getUTCFullYear()
   const m = String(date.getUTCMonth() + 1).padStart(2, '0')
   return `${y}-${m}`
@@ -91,7 +90,6 @@ export async function markInvoicePaid(
     )
       .bind(paidAt, opts.localId)
       .run()
-    return
   }
   if (opts.stripeInvoiceId) {
     await env.DB.prepare(
@@ -107,9 +105,17 @@ export async function syncInvoiceStatus(
   env: Env,
   stripeInvoiceId: string,
   status: string,
+  localId?: string,
 ): Promise<void> {
   if (status === 'paid') {
+    if (localId) await markInvoicePaid(env, { localId })
     await markInvoicePaid(env, { stripeInvoiceId })
+    return
+  }
+  if (localId) {
+    await env.DB.prepare(`UPDATE invoices SET status = ? WHERE id = ? OR stripe_invoice_id = ?`)
+      .bind(status, localId, stripeInvoiceId)
+      .run()
     return
   }
   await env.DB.prepare(`UPDATE invoices SET status = ? WHERE stripe_invoice_id = ?`)
@@ -117,11 +123,29 @@ export async function syncInvoiceStatus(
     .run()
 }
 
+export async function loadWebsiteBilling(
+  env: Env,
+  websiteId: string,
+): Promise<WebsiteBillingRow | null> {
+  return env.DB.prepare(
+    `SELECT id, name, domain, status,
+            COALESCE(monthly_fee_cents, 0) AS monthly_fee_cents,
+            billing_email, billing_name,
+            COALESCE(billing_enabled, 0) AS billing_enabled,
+            COALESCE(billing_suspended, 0) AS billing_suspended,
+            last_retainer_period, github_repo
+     FROM websites WHERE id = ?`,
+  )
+    .bind(websiteId)
+    .first<WebsiteBillingRow>()
+}
+
 export async function createRetainerInvoice(
   env: Env,
   site: WebsiteBillingRow,
   period: string,
 ): Promise<{ invoiceId: string } | { skipped: string } | { error: string }> {
+  if (site.billing_suspended) return { skipped: 'suspended' }
   if (!site.billing_enabled || site.monthly_fee_cents < 50) {
     return { skipped: 'billing_disabled' }
   }
@@ -129,18 +153,33 @@ export async function createRetainerInvoice(
     return { skipped: 'already_billed' }
   }
 
+  // Only treat a successful / in-flight invoice as locking the period.
   const existing = await env.DB.prepare(
-    `SELECT id FROM invoices WHERE website_id = ? AND kind = 'retainer' AND billing_period = ?`,
+    `SELECT id, status, stripe_invoice_id FROM invoices
+     WHERE website_id = ? AND kind = 'retainer' AND billing_period = ?
+     ORDER BY created_at DESC LIMIT 1`,
   )
     .bind(site.id, period)
-    .first()
-  if (existing) {
+    .first<{ id: string; status: string; stripe_invoice_id: string | null }>()
+
+  if (existing && existing.status !== 'failed') {
     await env.DB.prepare(
       `UPDATE websites SET last_retainer_period = ?, updated_at = ? WHERE id = ?`,
     )
       .bind(period, nowIso(), site.id)
       .run()
     return { skipped: 'period_exists' }
+  }
+  if (existing?.status === 'failed' && existing.stripe_invoice_id) {
+    await env.DB.prepare(
+      `UPDATE websites SET last_retainer_period = ?, updated_at = ? WHERE id = ?`,
+    )
+      .bind(period, nowIso(), site.id)
+      .run()
+    return { skipped: 'period_exists' }
+  }
+  if (existing?.status === 'failed') {
+    await env.DB.prepare(`DELETE FROM invoices WHERE id = ?`).bind(existing.id).run()
   }
 
   const contact = await resolveBillingContact(env, site)
@@ -182,18 +221,15 @@ export async function suspendWebsiteForNonpayment(
 
   const title = 'Website paused - payment required'
   const message =
-    'This site has been unpublished because two or more monthly invoices are past due. ' +
+    'This site is offline because two or more monthly invoices are past due. ' +
     'Pay outstanding invoices from your Blacnova dashboard (Billing), then contact nic@blacnova.net to restore the site.'
 
-  await env.DB.batch([
-    env.DB.prepare(
-      `UPDATE websites SET
-        billing_suspended = 1,
-        status = 'offline',
-        updated_at = ?
-       WHERE id = ?`,
-    ).bind(nowIso(), site.id),
-    env.DB.prepare(
+  const maint = await env.DB.prepare(`SELECT website_id FROM maintenance WHERE website_id = ?`)
+    .bind(site.id)
+    .first()
+
+  if (maint) {
+    await env.DB.prepare(
       `UPDATE maintenance SET
         enabled = 1,
         title = ?,
@@ -201,17 +237,10 @@ export async function suspendWebsiteForNonpayment(
         expected_return = '',
         updated_at = ?
        WHERE website_id = ?`,
-    ).bind(title, message, nowIso(), site.id),
-    env.DB.prepare(
-      `UPDATE pages SET status = 'unpublished', updated_at = ? WHERE website_id = ?`,
-    ).bind(today(), site.id),
-  ])
-
-  // Ensure maintenance row exists if missing
-  const maint = await env.DB.prepare(`SELECT website_id FROM maintenance WHERE website_id = ?`)
-    .bind(site.id)
-    .first()
-  if (!maint) {
+    )
+      .bind(title, message, nowIso(), site.id)
+      .run()
+  } else {
     await env.DB.prepare(
       `INSERT INTO maintenance (website_id, enabled, title, message, expected_return, updated_at)
        VALUES (?, 1, ?, ?, '', ?)`,
@@ -220,10 +249,30 @@ export async function suspendWebsiteForNonpayment(
       .run()
   }
 
+  await env.DB.prepare(
+    `UPDATE websites SET
+      billing_suspended = 1,
+      status = 'offline',
+      updated_at = ?
+     WHERE id = ?`,
+  )
+    .bind(nowIso(), site.id)
+    .run()
+
+  const primaryRepo = env.GITHUB_REPO || 'nicholasxdavis/BlacnovaWebsite'
+  if (!site.github_repo || site.github_repo === primaryRepo) {
+    await mirrorMaintenanceJson(env, {
+      enabled: true,
+      title,
+      message,
+      reason: `billing suspend ${site.domain}`,
+    })
+  }
+
   await createNotification(env, {
     websiteId: site.id,
     type: 'billing_suspend',
-    title: 'Website unpublished for nonpayment',
+    title: 'Website offline for nonpayment',
     body: 'Two or more monthly invoices are past due. Pay invoices under Billing, then contact Blacnova to restore the site.',
     link: '/billing',
   })
@@ -231,7 +280,7 @@ export async function suspendWebsiteForNonpayment(
   const contact = await resolveBillingContact(env, site)
   const support = env.SUPPORT_EMAIL || 'nic@blacnova.net'
   const text = [
-    `Website unpublished for nonpayment`,
+    `Website offline for nonpayment`,
     '',
     `Client: ${site.name} (${site.domain})`,
     `Reason: ${MISS_THRESHOLD}+ past-due monthly invoices.`,
@@ -263,7 +312,7 @@ export async function suspendWebsiteForNonpayment(
       await sendBrevoEmail(env, {
         toEmail: r.email,
         toName: r.name,
-        subject: `Action required: ${site.domain} unpublished for nonpayment`,
+        subject: `Action required: ${site.domain} offline for nonpayment`,
         html,
         text,
       })
@@ -277,9 +326,7 @@ export async function restoreWebsiteBilling(
   env: Env,
   websiteId: string,
 ): Promise<boolean> {
-  const site = await env.DB.prepare(`SELECT id FROM websites WHERE id = ?`)
-    .bind(websiteId)
-    .first()
+  const site = await loadWebsiteBilling(env, websiteId)
   if (!site) return false
 
   await env.DB.batch([
@@ -289,10 +336,17 @@ export async function restoreWebsiteBilling(
     env.DB.prepare(
       `UPDATE maintenance SET enabled = 0, updated_at = ? WHERE website_id = ?`,
     ).bind(nowIso(), websiteId),
-    env.DB.prepare(
-      `UPDATE pages SET status = 'published', updated_at = ? WHERE website_id = ?`,
-    ).bind(today(), websiteId),
   ])
+
+  const primaryRepo = env.GITHUB_REPO || 'nicholasxdavis/BlacnovaWebsite'
+  if (!site.github_repo || site.github_repo === primaryRepo) {
+    await mirrorMaintenanceJson(env, {
+      enabled: false,
+      title: "We'll be right back",
+      message: `${site.name} is temporarily offline for improvements. Please check back soon.`,
+      reason: `billing restore ${site.domain}`,
+    })
+  }
 
   await createNotification(env, {
     websiteId,
@@ -305,7 +359,10 @@ export async function restoreWebsiteBilling(
   return true
 }
 
-/** Run on the 1st (UTC): create retainer invoices for enabled sites. */
+/**
+ * Create monthly retainers for the current UTC period.
+ * Bills on the 1st; later days only catch up if the 1st run was missed.
+ */
 export async function processMonthlyRetainers(env: Env): Promise<{
   processed: number
   sent: number
@@ -313,11 +370,9 @@ export async function processMonthlyRetainers(env: Env): Promise<{
   errors: string[]
 }> {
   const now = new Date()
-  if (now.getUTCDate() !== 1) {
-    return { processed: 0, sent: 0, skipped: 0, errors: [] }
-  }
-
+  const day = now.getUTCDate()
   const period = periodKey(now)
+
   const { results } = await env.DB.prepare(
     `SELECT id, name, domain, status,
             COALESCE(monthly_fee_cents, 0) AS monthly_fee_cents,
@@ -327,6 +382,7 @@ export async function processMonthlyRetainers(env: Env): Promise<{
             last_retainer_period, github_repo
      FROM websites
      WHERE COALESCE(billing_enabled, 0) = 1
+       AND COALESCE(billing_suspended, 0) = 0
        AND COALESCE(monthly_fee_cents, 0) >= 50`,
   ).all<WebsiteBillingRow>()
 
@@ -336,11 +392,23 @@ export async function processMonthlyRetainers(env: Env): Promise<{
   const errors: string[] = []
 
   for (const site of results || []) {
+    // Mid-month enable waits until the next 1st. Catch-up only if a prior cycle exists.
+    if (day !== 1) {
+      if (!site.last_retainer_period || site.last_retainer_period >= period) {
+        skipped += 1
+        continue
+      }
+    }
+
     processed += 1
-    const result = await createRetainerInvoice(env, site, period)
-    if ('invoiceId' in result) sent += 1
-    else if ('skipped' in result) skipped += 1
-    else errors.push(`${site.id}: ${result.error}`)
+    try {
+      const result = await createRetainerInvoice(env, site, period)
+      if ('invoiceId' in result) sent += 1
+      else if ('skipped' in result) skipped += 1
+      else errors.push(`${site.id}: ${result.error}`)
+    } catch (err) {
+      errors.push(`${site.id}: ${err instanceof Error ? err.message : String(err)}`)
+    }
   }
 
   return { processed, sent, skipped, errors }
@@ -368,10 +436,14 @@ export async function enforceNonpaymentSuspensions(env: Env): Promise<{
 
   for (const site of results || []) {
     checked += 1
-    const missed = await countMissedRetainers(env, site.id)
-    if (missed >= MISS_THRESHOLD) {
-      await suspendWebsiteForNonpayment(env, site)
-      suspended += 1
+    try {
+      const missed = await countMissedRetainers(env, site.id)
+      if (missed >= MISS_THRESHOLD) {
+        await suspendWebsiteForNonpayment(env, site)
+        suspended += 1
+      }
+    } catch (err) {
+      console.error(JSON.stringify({ dunning_failed: String(err), websiteId: site.id }))
     }
   }
 
@@ -405,10 +477,12 @@ export async function getClientBillingSummary(env: Env, websiteId: string) {
   if (!site) return null
 
   const missed = await countMissedRetainers(env, websiteId)
+  const current = periodKey()
   const nextPeriod = (() => {
     const d = new Date()
-    if (d.getUTCDate() === 1 && site.last_retainer_period !== periodKey(d)) {
-      return periodKey(d)
+    // Next calendar 1st unless today's the 1st and this month is still unpaid.
+    if (d.getUTCDate() === 1 && site.last_retainer_period !== current) {
+      return current
     }
     const n = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1))
     return periodKey(n)

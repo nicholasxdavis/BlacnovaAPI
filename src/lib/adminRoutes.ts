@@ -1,6 +1,6 @@
 import { hashPassword } from './auth'
 import { DEFAULT_CLIENT_MODULES, isPlatformUser, withBillingModule } from './admin'
-import { restoreWebsiteBilling } from './billing'
+import { createRetainerInvoice, loadWebsiteBilling, periodKey, restoreWebsiteBilling } from './billing'
 import { error, id, json, nowIso, today } from './http'
 import { createAndSendInvoice, deleteInvoiceRecord, listInvoices } from './invoices'
 import { getBmcOverview, syncBmcFromApi } from './bmc'
@@ -146,9 +146,11 @@ export async function handleAdmin(
 
     const websiteId = id('site')
     const modules = JSON.stringify(
-      Array.isArray(body.modules) && body.modules.length
-        ? body.modules
-        : [...DEFAULT_CLIENT_MODULES],
+      withBillingModule(
+        Array.isArray(body.modules) && body.modules.length
+          ? body.modules.map(String)
+          : [...DEFAULT_CLIENT_MODULES],
+      ),
     )
     await env.DB.prepare(
       `INSERT INTO websites (id, name, domain, status, modules, github_repo)
@@ -168,6 +170,16 @@ export async function handleAdmin(
       const ok = await restoreWebsiteBilling(env, clientId)
       if (!ok) return error('Client not found', 404)
       return json({ ok: true })
+    }
+
+    if (rest.endsWith('/bill-now') && rest.split('/').length === 2) {
+      const clientId = rest.split('/')[0]
+      const site = await loadWebsiteBilling(env, clientId)
+      if (!site) return error('Client not found', 404)
+      const result = await createRetainerInvoice(env, site, periodKey())
+      if ('error' in result) return error(result.error, 400)
+      if ('skipped' in result) return json({ ok: true, skipped: result.skipped })
+      return json({ ok: true, invoiceId: result.invoiceId })
     }
 
     const clientId = rest
@@ -203,7 +215,20 @@ export async function handleAdmin(
     if (body.monthlyFeeCents !== undefined) {
       const cents = Math.round(Number(body.monthlyFeeCents))
       if (!Number.isFinite(cents) || cents < 0) return error('monthlyFeeCents must be >= 0')
-      if (body.billingEnabled && cents > 0 && cents < 50) {
+    }
+
+    if (body.billingEnabled) {
+      const fee =
+        body.monthlyFeeCents !== undefined
+          ? Math.round(Number(body.monthlyFeeCents))
+          : (
+              await env.DB.prepare(
+                `SELECT COALESCE(monthly_fee_cents, 0) AS monthly_fee_cents FROM websites WHERE id = ?`,
+              )
+                .bind(clientId)
+                .first<{ monthly_fee_cents: number }>()
+            )?.monthly_fee_cents ?? 0
+      if (fee < 50) {
         return error('Monthly fee must be at least $0.50 when billing is enabled')
       }
     }
@@ -274,6 +299,8 @@ export async function handleAdmin(
       env.DB.prepare(`DELETE FROM analytics_points WHERE website_id = ?`).bind(clientId),
       env.DB.prepare(`DELETE FROM support_tickets WHERE website_id = ?`).bind(clientId),
       env.DB.prepare(`DELETE FROM notifications WHERE website_id = ?`).bind(clientId),
+      env.DB.prepare(`DELETE FROM invoices WHERE website_id = ?`).bind(clientId),
+      env.DB.prepare(`DELETE FROM recurring_invoices WHERE website_id = ?`).bind(clientId),
       env.DB.prepare(`DELETE FROM websites WHERE id = ?`).bind(clientId),
     ])
     return json({ ok: true })
