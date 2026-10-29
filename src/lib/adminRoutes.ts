@@ -3,7 +3,7 @@ import { DEFAULT_CLIENT_MODULES, isFinanceOwner, isPlatformUser, requireFinanceO
 import { assertPasswordPolicy } from './config'
 import { createRetainerInvoice, loadWebsiteBilling, periodKey, restoreWebsiteBilling } from './billing'
 import { error, id, json, nowIso, today } from './http'
-import { createAndSendInvoice, deleteInvoiceRecord, listInvoices } from './invoices'
+import { createAndSendInvoice, deleteInvoiceRecord, listInvoices, summarizeInvoices } from './invoices'
 import { getBmcOverview, syncBmcFromApi } from './bmc'
 import { clampString, isValidEmail } from './security'
 import { revokeUserSessions } from './session'
@@ -514,8 +514,8 @@ export async function handleAdmin(
 
   // --- Invoices (Stripe + Brevo) ---
   if (path === '/v1/admin/invoices' && method === 'GET') {
-    const invoices = await listInvoices(env)
-    return json({ invoices })
+    const [invoices, summary] = await Promise.all([listInvoices(env), summarizeInvoices(env)])
+    return json({ invoices, summary })
   }
 
   if (path === '/v1/admin/invoices' && method === 'POST') {

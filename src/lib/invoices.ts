@@ -131,6 +131,90 @@ export async function listInvoicesForWebsite(
   return (results || []).map(mapInvoiceRow)
 }
 
+export interface InvoiceSummary {
+  billedCents: number
+  billedFormatted: string
+  paidCents: number
+  paidFormatted: string
+  paidCount: number
+  openCents: number
+  openFormatted: string
+  openCount: number
+  invoiceCount: number
+  recurringMonthlyCents: number
+  recurringMonthlyFormatted: string
+  recurringActive: number
+  retainerMonthlyCents: number
+  retainerMonthlyFormatted: string
+  retainerClients: number
+  expectedMonthlyCents: number
+  expectedMonthlyFormatted: string
+}
+
+export async function summarizeInvoices(env: Env): Promise<InvoiceSummary> {
+  const invoices = await env.DB.prepare(
+    `SELECT
+       COUNT(*) AS total_count,
+       COALESCE(SUM(amount_cents), 0) AS billed_cents,
+       COALESCE(SUM(CASE WHEN status = 'paid' THEN amount_cents ELSE 0 END), 0) AS paid_cents,
+       COALESCE(SUM(CASE WHEN status = 'paid' THEN 1 ELSE 0 END), 0) AS paid_count,
+       COALESCE(SUM(CASE WHEN status IN ('open', 'uncollectible', 'past_due') THEN amount_cents ELSE 0 END), 0) AS open_cents,
+       COALESCE(SUM(CASE WHEN status IN ('open', 'uncollectible', 'past_due') THEN 1 ELSE 0 END), 0) AS open_count
+     FROM invoices`,
+  ).first<{
+    total_count: number
+    billed_cents: number
+    paid_cents: number
+    paid_count: number
+    open_cents: number
+    open_count: number
+  }>()
+
+  const recurring = await env.DB.prepare(
+    `SELECT
+       COALESCE(SUM(amount_cents), 0) AS monthly_cents,
+       COUNT(*) AS active_count
+     FROM recurring_invoices
+     WHERE active = 1`,
+  ).first<{ monthly_cents: number; active_count: number }>()
+
+  const retainers = await env.DB.prepare(
+    `SELECT
+       COALESCE(SUM(monthly_fee_cents), 0) AS monthly_cents,
+       COUNT(*) AS client_count
+     FROM websites
+     WHERE COALESCE(billing_enabled, 0) = 1
+       AND COALESCE(billing_suspended, 0) = 0
+       AND COALESCE(monthly_fee_cents, 0) >= 50`,
+  ).first<{ monthly_cents: number; client_count: number }>()
+
+  const billed = Number(invoices?.billed_cents) || 0
+  const paid = Number(invoices?.paid_cents) || 0
+  const open = Number(invoices?.open_cents) || 0
+  const recMonthly = Number(recurring?.monthly_cents) || 0
+  const retMonthly = Number(retainers?.monthly_cents) || 0
+
+  return {
+    billedCents: billed,
+    billedFormatted: centsToUsd(billed, 'usd'),
+    paidCents: paid,
+    paidFormatted: centsToUsd(paid, 'usd'),
+    paidCount: Number(invoices?.paid_count) || 0,
+    openCents: open,
+    openFormatted: centsToUsd(open, 'usd'),
+    openCount: Number(invoices?.open_count) || 0,
+    invoiceCount: Number(invoices?.total_count) || 0,
+    recurringMonthlyCents: recMonthly,
+    recurringMonthlyFormatted: centsToUsd(recMonthly, 'usd'),
+    recurringActive: Number(recurring?.active_count) || 0,
+    retainerMonthlyCents: retMonthly,
+    retainerMonthlyFormatted: centsToUsd(retMonthly, 'usd'),
+    retainerClients: Number(retainers?.client_count) || 0,
+    expectedMonthlyCents: recMonthly + retMonthly,
+    expectedMonthlyFormatted: centsToUsd(recMonthly + retMonthly, 'usd'),
+  }
+}
+
 /** Remove invoice from the portal ledger. Best-effort void on Stripe when still open. */
 export async function deleteInvoiceRecord(env: Env, invoiceId: string): Promise<boolean> {
   const row = await env.DB.prepare(
