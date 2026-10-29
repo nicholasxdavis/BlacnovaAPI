@@ -1,6 +1,7 @@
 import { hashPassword } from './auth'
-import { DEFAULT_CLIENT_MODULES, isFinanceOwner, isPlatformUser, requireFinanceOwner, withBillingModule } from './admin'
-import { assertPasswordPolicy } from './config'
+import { DEFAULT_CLIENT_MODULES, isFinanceOwner, isPlatformUser, requireFinanceOwner, withPortalModules } from './admin'
+import { intakeEmailContent, sendBrevoEmail, welcomeEmailContent } from './brevo'
+import { assertPasswordPolicy, generateTempPassword } from './config'
 import { createRetainerInvoice, loadWebsiteBilling, periodKey, restoreWebsiteBilling } from './billing'
 import { error, id, json, nowIso, today } from './http'
 import { createAndSendInvoice, deleteInvoiceRecord, listInvoices, summarizeInvoices } from './invoices'
@@ -16,10 +17,55 @@ function parseModules(raw: string): string[] {
   try {
     const parsed = JSON.parse(raw)
     return Array.isArray(parsed)
-      ? withBillingModule(parsed.map(String))
+      ? withPortalModules(parsed.map(String))
       : [...DEFAULT_CLIENT_MODULES]
   } catch {
     return [...DEFAULT_CLIENT_MODULES]
+  }
+}
+
+async function emailIntakeLink(
+  env: Env,
+  opts: { clientName: string; email: string; name?: string },
+): Promise<{ ok: true; intakeUrl: string } | { ok: false; error: string; intakeUrl: string }> {
+  const mail = intakeEmailContent({ clientName: opts.clientName, toName: opts.name })
+  try {
+    await sendBrevoEmail(env, {
+      toEmail: opts.email,
+      toName: opts.name || opts.clientName,
+      subject: mail.subject,
+      html: mail.html,
+      text: mail.text,
+    })
+    return { ok: true, intakeUrl: mail.intakeUrl }
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : 'Could not send intake', intakeUrl: mail.intakeUrl }
+  }
+}
+
+async function emailWelcome(
+  env: Env,
+  opts: {
+    name: string
+    email: string
+    password: string
+    websiteName: string
+    websiteDomain: string
+  },
+): Promise<boolean> {
+  const mail = welcomeEmailContent(opts)
+  try {
+    await sendBrevoEmail(env, {
+      toEmail: opts.email,
+      toName: opts.name,
+      subject: mail.subject,
+      html: mail.html,
+      text: mail.text,
+    })
+    return true
+  } catch (err) {
+    console.error(JSON.stringify({ err: 'welcome_email', detail: String(err) }))
+    return false
   }
 }
 
@@ -135,33 +181,140 @@ export async function handleAdmin(
       domain?: string
       githubRepo?: string
       modules?: string[]
+      contactEmail?: string
+      sendIntake?: boolean
+      createDashboard?: boolean
+      dashboardName?: string
+      dashboardEmail?: string
+      dashboardPassword?: string
+      sendWelcome?: boolean
     }
     const name = clampString(body.name, 120)
     const domain = clampString(body.domain, 120).toLowerCase()
+    const contactEmail = clampString(body.contactEmail, 254).toLowerCase()
     if (!name || !domain) return error('Name and domain are required')
+    if (contactEmail && !isValidEmail(contactEmail)) return error('Contact email is invalid')
+    if (body.sendIntake && !contactEmail) return error('Contact email is required to send the intake')
+
+    const dashboardEmail = clampString(body.dashboardEmail || contactEmail, 254).toLowerCase()
+    const dashboardName = clampString(body.dashboardName || name, 120)
+    let dashboardPassword = ''
+    if (body.createDashboard) {
+      if (!dashboardEmail || !isValidEmail(dashboardEmail)) {
+        return error('A valid dashboard email is required')
+      }
+      dashboardPassword = body.dashboardPassword
+        ? String(body.dashboardPassword)
+        : generateTempPassword()
+      const passwordError = assertPasswordPolicy(dashboardPassword)
+      if (passwordError) return error(passwordError)
+    }
 
     const exists = await env.DB.prepare(`SELECT id FROM websites WHERE domain = ?`)
       .bind(domain)
       .first()
     if (exists) return error('A client with that domain already exists', 409)
 
+    if (body.createDashboard) {
+      const taken = await env.DB.prepare(`SELECT id FROM users WHERE email = ?`).bind(dashboardEmail).first()
+      if (taken) return error('An account with that email already exists', 409)
+    }
+
     const websiteId = id('site')
     const modules = JSON.stringify(
-      withBillingModule(
+      withPortalModules(
         Array.isArray(body.modules) && body.modules.length
           ? body.modules.map(String)
           : [...DEFAULT_CLIENT_MODULES],
       ),
     )
     await env.DB.prepare(
-      `INSERT INTO websites (id, name, domain, status, modules, github_repo)
-       VALUES (?, ?, ?, 'live', ?, ?)`,
+      `INSERT INTO websites (id, name, domain, status, modules, github_repo, billing_email, billing_name)
+       VALUES (?, ?, ?, 'live', ?, ?, ?, ?)`,
     )
-      .bind(websiteId, name, domain, modules, clampString(body.githubRepo, 200) || null)
+      .bind(
+        websiteId,
+        name,
+        domain,
+        modules,
+        clampString(body.githubRepo, 200) || null,
+        contactEmail || null,
+        contactEmail ? name : null,
+      )
       .run()
     await seedWebsiteDefaults(env, websiteId, name)
 
-    return json({ id: websiteId, name, domain }, 201)
+    let intakeSent: boolean | null = null
+    let intakeUrl: string | null = null
+    if (body.sendIntake && contactEmail) {
+      const sent = await emailIntakeLink(env, { clientName: name, email: contactEmail, name })
+      intakeSent = sent.ok
+      intakeUrl = sent.intakeUrl
+    }
+
+    let accountId: string | null = null
+    let welcomeSent: boolean | null = null
+    if (body.createDashboard && dashboardEmail) {
+      accountId = id('user')
+      const passwordHash = await hashPassword(dashboardPassword)
+      await env.DB.prepare(
+        `INSERT INTO users (id, email, name, role, password_hash, website_id, active)
+         VALUES (?, ?, ?, 'manager', ?, ?, 1)`,
+      )
+        .bind(accountId, dashboardEmail, dashboardName, passwordHash, websiteId)
+        .run()
+      if (body.sendWelcome !== false) {
+        welcomeSent = await emailWelcome(env, {
+          name: dashboardName,
+          email: dashboardEmail,
+          password: dashboardPassword,
+          websiteName: name,
+          websiteDomain: domain,
+        })
+      }
+    }
+
+    return json(
+      {
+        id: websiteId,
+        name,
+        domain,
+        intakeSent,
+        intakeUrl,
+        accountId,
+        welcomeSent,
+      },
+      201,
+    )
+  }
+
+  if (path.match(/^\/v1\/admin\/clients\/[^/]+\/send-intake$/) && method === 'POST') {
+    const clientId = path.split('/')[4]
+    const body = (await request.json()) as { email?: string; name?: string }
+    const email = clampString(body.email, 254).toLowerCase()
+    if (!email || !isValidEmail(email)) return error('A valid email is required')
+
+    const site = await env.DB.prepare(
+      `SELECT id, name, billing_email FROM websites WHERE id = ?`,
+    )
+      .bind(clientId)
+      .first<{ id: string; name: string; billing_email: string | null }>()
+    if (!site) return error('Client not found', 404)
+
+    const sent = await emailIntakeLink(env, {
+      clientName: site.name,
+      email,
+      name: clampString(body.name, 120) || site.name,
+    })
+    if (!site.billing_email) {
+      await env.DB.prepare(
+        `UPDATE websites SET billing_email = ?, billing_name = COALESCE(billing_name, ?), updated_at = ? WHERE id = ?`,
+      )
+        .bind(email, site.name, nowIso(), clientId)
+        .run()
+    }
+    if (!sent.ok) return error(sent.error, 502)
+    return json({ ok: true, intakeUrl: sent.intakeUrl })
   }
 
   if (path.startsWith('/v1/admin/clients/') && method === 'PATCH') {
@@ -240,7 +393,7 @@ export async function handleAdmin(
     }
 
     const modulesJson = body.modules
-      ? JSON.stringify(withBillingModule(body.modules.map(String)))
+      ? JSON.stringify(withPortalModules(body.modules.map(String)))
       : null
 
     await env.DB.prepare(
@@ -351,11 +504,13 @@ export async function handleAdmin(
       password?: string
       websiteId?: string
       role?: string
+      sendWelcome?: boolean
     }
     const email = clampString(body.email, 254).toLowerCase()
     const name = clampString(body.name, 120)
-    const password = String(body.password || '')
     const websiteId = clampString(body.websiteId, 64)
+    const sendWelcome = Boolean(body.sendWelcome)
+    const password = String(body.password || (sendWelcome ? generateTempPassword() : ''))
     const role =
       body.role === 'platform'
         ? isFinanceOwner(user, env)
@@ -363,9 +518,10 @@ export async function handleAdmin(
           : 'manager'
         : 'manager'
 
-    if (!email || !name || !password || !websiteId) {
-      return error('email, name, password, and websiteId are required')
+    if (!email || !name || !websiteId) {
+      return error('email, name, and websiteId are required')
     }
+    if (!password) return error('Password is required when not sending a welcome email')
     if (!isValidEmail(email)) return error('A valid email is required')
     const passwordError = assertPasswordPolicy(password)
     if (passwordError) return error(passwordError)
@@ -373,9 +529,9 @@ export async function handleAdmin(
       return error('Forbidden', 403)
     }
 
-    const website = await env.DB.prepare(`SELECT id FROM websites WHERE id = ?`)
+    const website = await env.DB.prepare(`SELECT id, name, domain FROM websites WHERE id = ?`)
       .bind(websiteId)
-      .first()
+      .first<{ id: string; name: string; domain: string }>()
     if (!website) return error('Website not found', 404)
 
     const exists = await env.DB.prepare(`SELECT id FROM users WHERE email = ?`).bind(email).first()
@@ -390,7 +546,18 @@ export async function handleAdmin(
       .bind(userId, email, name, role, passwordHash, websiteId)
       .run()
 
-    return json({ id: userId, email, name, role, websiteId }, 201)
+    let welcomeSent: boolean | null = null
+    if (sendWelcome) {
+      welcomeSent = await emailWelcome(env, {
+        name,
+        email,
+        password,
+        websiteName: website.name,
+        websiteDomain: website.domain,
+      })
+    }
+
+    return json({ id: userId, email, name, role, websiteId, welcomeSent }, 201)
   }
 
   if (path.match(/^\/v1\/admin\/accounts\/[^/]+\/reset-password$/) && method === 'POST') {

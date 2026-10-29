@@ -29,3 +29,12 @@ export function assertPasswordPolicy(password: string): string | null {
   }
   return null
 }
+
+export function generateTempPassword(length = 14): string {
+  const size = Math.max(MIN_PASSWORD_LENGTH, length)
+  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789'
+  const bytes = crypto.getRandomValues(new Uint8Array(size))
+  let out = ''
+  for (const byte of bytes) out += alphabet[byte % alphabet.length]
+  return out
+}

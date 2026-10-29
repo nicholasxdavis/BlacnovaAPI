@@ -270,6 +270,94 @@ export function nonpaymentEmailContent(
   return { subject, html, text }
 }
 
+export const INTAKE_ORIGIN = 'https://blacnova.pages.dev'
+export const DASHBOARD_ORIGIN = 'https://dashboard.blacnova.net'
+
+export function clientIntakeUrl(clientName: string): string {
+  return `${INTAKE_ORIGIN}/for/${encodeURIComponent(clientName.trim())}`
+}
+
+export function intakeEmailContent(opts: {
+  clientName: string
+  toName?: string
+}): { subject: string; html: string; text: string; intakeUrl: string } {
+  const url = clientIntakeUrl(opts.clientName)
+  const greet = opts.toName ? `Hi ${opts.toName},` : 'Hi,'
+  const subject = `Website intake for ${opts.clientName}`
+  const text = [
+    greet,
+    '',
+    `Please complete this short intake so we can start on ${opts.clientName}.`,
+    '',
+    `Start here: ${url}`,
+    '',
+    'Skip anything that does not apply. It takes a few minutes.',
+    '',
+    'Thank you,',
+    'Blacnova Development',
+  ].join('\n')
+
+  const bodyHtml = `
+    <p style="margin:0 0 16px;">${escapeHtml(greet)}</p>
+    <p style="margin:0 0 16px;">Please complete this short intake so we can start on <strong style="color:#000000;">${escapeHtml(opts.clientName)}</strong>.</p>
+    <p style="margin:0;">Skip anything that does not apply. It only takes a few minutes.</p>`
+
+  const html = brandedEmailHtml({
+    title: 'Website intake',
+    bodyHtml,
+    ctaLabel: 'Start intake',
+    ctaUrl: url,
+    footerNote: 'Sent by Blacnova Development.',
+  })
+
+  return { subject, html, text, intakeUrl: url }
+}
+
+export function welcomeEmailContent(opts: {
+  name: string
+  email: string
+  password: string
+  websiteName: string
+  websiteDomain: string
+}): { subject: string; html: string; text: string } {
+  const loginUrl = DASHBOARD_ORIGIN
+  const subject = `Your ${opts.websiteName} dashboard is ready`
+  const text = [
+    `Hi ${opts.name},`,
+    '',
+    `Your Blacnova client portal for ${opts.websiteName} (${opts.websiteDomain}) is ready.`,
+    '',
+    `Sign in: ${loginUrl}`,
+    `Email: ${opts.email}`,
+    `Temporary password: ${opts.password}`,
+    '',
+    'Change this password after you sign in.',
+    '',
+    'Thank you,',
+    'Blacnova Development',
+  ].join('\n')
+
+  const bodyHtml = `
+    <p style="margin:0 0 16px;">Hi ${escapeHtml(opts.name)},</p>
+    <p style="margin:0 0 16px;">Your client portal for <strong style="color:#000000;">${escapeHtml(opts.websiteName)}</strong> (${escapeHtml(opts.websiteDomain)}) is ready.</p>
+    <table role="presentation" class="bn-panel" width="100%" cellspacing="0" cellpadding="0" border="0" bgcolor="#f9fafb" style="margin:0 0 16px;background-color:#f9fafb;border:1px solid #e5e7eb;border-radius:8px;">
+      <tr><td style="padding:12px 16px;border-bottom:1px solid #e5e7eb;"><div style="font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:#6b7280;">Sign in</div><div style="color:#1a1a1a;margin-top:4px;">${escapeHtml(loginUrl)}</div></td></tr>
+      <tr><td style="padding:12px 16px;border-bottom:1px solid #e5e7eb;"><div style="font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:#6b7280;">Email</div><div style="color:#1a1a1a;margin-top:4px;">${escapeHtml(opts.email)}</div></td></tr>
+      <tr><td style="padding:12px 16px;"><div style="font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:#6b7280;">Temporary password</div><div style="color:#1a1a1a;margin-top:4px;">${escapeHtml(opts.password)}</div></td></tr>
+    </table>
+    <p style="margin:0;">Change this password after you sign in.</p>`
+
+  const html = brandedEmailHtml({
+    title: 'Your dashboard is ready',
+    bodyHtml,
+    ctaLabel: 'Open dashboard',
+    ctaUrl: loginUrl,
+    footerNote: 'Blacnova Development — questions? Reply to this email.',
+  })
+
+  return { subject, html, text }
+}
+
 export function escapeHtml(value: string): string {
   return value
     .replace(/&/g, '&amp;')
