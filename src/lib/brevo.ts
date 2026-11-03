@@ -313,6 +313,62 @@ export function intakeEmailContent(opts: {
   return { subject, html, text, intakeUrl: url }
 }
 
+export function submissionNotifyEmailContent(opts: {
+  websiteName: string
+  websiteDomain: string
+  name: string
+  email: string
+  phone?: string | null
+  subject: string
+  message: string
+  source: string
+}): { subject: string; html: string; text: string } {
+  const submissionsUrl = `${DASHBOARD_ORIGIN}/submissions`
+  const mailSubject = `New ${opts.source.toLowerCase()} - ${opts.websiteName}`
+  const phoneLine = opts.phone ? `Phone: ${opts.phone}` : null
+  const text = [
+    `New form submission for ${opts.websiteName}`,
+    '',
+    `Source: ${opts.source}`,
+    `Name: ${opts.name}`,
+    `Email: ${opts.email}`,
+    phoneLine,
+    `Subject: ${opts.subject}`,
+    '',
+    opts.message,
+    '',
+    `Open submissions: ${submissionsUrl}`,
+  ]
+    .filter((line) => line !== null)
+    .join('\n')
+
+  const phoneRow = opts.phone
+    ? `<tr><td style="padding:12px 16px;border-bottom:1px solid #e5e7eb;"><div style="font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:#6b7280;">Phone</div><div style="color:#1a1a1a;margin-top:4px;">${escapeHtml(opts.phone)}</div></td></tr>`
+    : ''
+
+  const bodyHtml = `
+    <p style="margin:0 0 16px;">Someone submitted a form on <strong style="color:#000000;">${escapeHtml(opts.websiteName)}</strong> (${escapeHtml(opts.websiteDomain)}).</p>
+    <table role="presentation" class="bn-panel" width="100%" cellspacing="0" cellpadding="0" border="0" bgcolor="#f9fafb" style="margin:0 0 16px;background-color:#f9fafb;border:1px solid #e5e7eb;border-radius:8px;">
+      <tr><td style="padding:12px 16px;border-bottom:1px solid #e5e7eb;"><div style="font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:#6b7280;">Source</div><div style="color:#1a1a1a;margin-top:4px;">${escapeHtml(opts.source)}</div></td></tr>
+      <tr><td style="padding:12px 16px;border-bottom:1px solid #e5e7eb;"><div style="font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:#6b7280;">Name</div><div style="color:#1a1a1a;margin-top:4px;">${escapeHtml(opts.name)}</div></td></tr>
+      <tr><td style="padding:12px 16px;border-bottom:1px solid #e5e7eb;"><div style="font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:#6b7280;">Email</div><div style="color:#1a1a1a;margin-top:4px;">${escapeHtml(opts.email)}</div></td></tr>
+      ${phoneRow}
+      <tr><td style="padding:12px 16px;border-bottom:1px solid #e5e7eb;"><div style="font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:#6b7280;">Subject</div><div style="color:#1a1a1a;margin-top:4px;">${escapeHtml(opts.subject)}</div></td></tr>
+      <tr><td style="padding:12px 16px;"><div style="font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:#6b7280;">Message</div><div style="color:#1a1a1a;margin-top:4px;white-space:pre-wrap;">${escapeHtml(opts.message)}</div></td></tr>
+    </table>
+    <p style="margin:0;">Reply to the lead from your email, or open Submissions in the dashboard.</p>`
+
+  const html = brandedEmailHtml({
+    title: 'New form submission',
+    bodyHtml,
+    ctaLabel: 'Open submissions',
+    ctaUrl: submissionsUrl,
+    footerNote: 'Blacnova Development. Manage email alerts in Dashboard Settings.',
+  })
+
+  return { subject: mailSubject, html, text }
+}
+
 export function welcomeEmailContent(opts: {
   name: string
   email: string

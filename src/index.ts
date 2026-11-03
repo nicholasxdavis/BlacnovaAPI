@@ -16,7 +16,7 @@ import { clampString, clientIp, hasBrowserOrigin, isAllowedFormOrigin, isDisposa
 import { createSession, destroySession, getSessionUser, revokeUserSessions } from './lib/session'
 import { handleAdmin } from './lib/adminRoutes'
 import { ingestBmcWebhook, verifyBmcSignature } from './lib/bmc'
-import { sendBrevoEmail, supportTicketEmailContent } from './lib/brevo'
+import { sendBrevoEmail, submissionNotifyEmailContent, supportTicketEmailContent } from './lib/brevo'
 import {
   assertPasswordPolicy,
   DUMMY_PASSWORD_HASH,
@@ -27,7 +27,7 @@ import {
   getClientBillingSummary,
   processMonthlyRetainers,
 } from './lib/billing'
-import { listNotifications, markNotificationsRead } from './lib/notifications'
+import { createNotification, listNotifications, markNotificationsRead } from './lib/notifications'
 import { listInvoicesForWebsite, processDueRecurringInvoices } from './lib/invoices'
 import { handleStripeWebhook } from './lib/stripeWebhook'
 import type { Env } from './lib/types'
@@ -738,9 +738,9 @@ async function createPublicSubmission(request: Request, env: Env): Promise<Respo
   const allowed = await rateLimit(env, `submit:${ip}`, browser ? 8 : 3, 60 * 60)
   if (!allowed) return error('Too many submissions. Try again later.', 429)
 
-  const website = await env.DB.prepare(`SELECT id FROM websites WHERE domain = ?`)
+  const website = await env.DB.prepare(`SELECT id, name, domain FROM websites WHERE domain = ?`)
     .bind(domain)
-    .first<{ id: string }>()
+    .first<{ id: string; name: string; domain: string }>()
   if (!website) return error('Website not found', 404)
 
   // Soft duplicate guard: same email + identical message within 10 minutes
@@ -763,6 +763,63 @@ async function createPublicSubmission(request: Request, env: Env): Promise<Respo
   )
     .bind(submissionId, website.id, name, email, phone, subject, message, source, nowIso())
     .run()
+
+  try {
+    await createNotification(env, {
+      websiteId: website.id,
+      type: 'submission',
+      title: `New ${source}`,
+      body: `${name} · ${subject}`,
+      link: '/submissions',
+    })
+  } catch (err) {
+    console.error(JSON.stringify({ err: 'submission_notify_inapp', detail: String(err) }))
+  }
+
+  try {
+    const { results: recipients } = await env.DB.prepare(
+      `SELECT email, name FROM users
+       WHERE website_id = ?
+         AND COALESCE(active, 1) = 1
+         AND COALESCE(notify_submissions, 1) = 1`,
+    )
+      .bind(website.id)
+      .all<{ email: string; name: string }>()
+
+    if (recipients?.length) {
+      const mail = submissionNotifyEmailContent({
+        websiteName: website.name,
+        websiteDomain: website.domain,
+        name,
+        email,
+        phone,
+        subject,
+        message,
+        source,
+      })
+      await Promise.all(
+        recipients.map((recipient) =>
+          sendBrevoEmail(env, {
+            toEmail: recipient.email,
+            toName: recipient.name,
+            subject: mail.subject,
+            html: mail.html,
+            text: mail.text,
+          }).catch((err) => {
+            console.error(
+              JSON.stringify({
+                err: 'submission_notify_email',
+                to: recipient.email,
+                detail: String(err),
+              }),
+            )
+          }),
+        ),
+      )
+    }
+  } catch (err) {
+    console.error(JSON.stringify({ err: 'submission_notify', detail: String(err) }))
+  }
 
   return json({ ok: true, id: submissionId }, 201)
 }
