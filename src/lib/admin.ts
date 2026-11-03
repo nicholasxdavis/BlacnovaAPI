@@ -22,6 +22,8 @@ export function requireFinanceOwner(user: SessionUser, env: Env): Response | nul
 
 export const DEFAULT_CLIENT_MODULES = [
   'overview',
+  'content',
+  'media',
   'maintenance',
   'submissions',
   'analytics',
@@ -31,8 +33,8 @@ export const DEFAULT_CLIENT_MODULES = [
 
 export const PLATFORM_MODULES = ['clients', 'accounts', 'finance', 'invoices', 'support'] as const
 
-/** Dashboard tabs retired — website CMS APIs stay so live sites are not affected. */
-export const RETIRED_PORTAL_MODULES = new Set(['content', 'media', 'pages'])
+/** Pages tab stays retired. Content + Media are live portal modules again. */
+export const RETIRED_PORTAL_MODULES = new Set(['pages'])
 
 /** Ensure every portal always exposes Billing (idempotent). */
 export function withBillingModule(modules: string[]): string[] {

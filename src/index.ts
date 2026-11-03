@@ -790,6 +790,13 @@ async function serveMediaFile(env: Env, path: string): Promise<Response> {
   })
 }
 
+async function websiteHasGithubRepo(env: Env, websiteId: string): Promise<boolean> {
+  const row = await env.DB.prepare(`SELECT github_repo FROM websites WHERE id = ?`)
+    .bind(websiteId)
+    .first<{ github_repo: string | null }>()
+  return Boolean(row?.github_repo)
+}
+
 async function uploadMedia(request: Request, env: Env, websiteId: string, actorEmail: string): Promise<Response> {
   const form = await request.formData()
   const file = form.get('file')
@@ -810,7 +817,12 @@ async function uploadMedia(request: Request, env: Env, websiteId: string, actorE
   let publicUrl = mediaUrl(request, mediaId)
   let githubPath: string | null = null
 
-  if (env.GITHUB_TOKEN && (type === 'image' || contentType.startsWith('image/'))) {
+  const pushGithub =
+    Boolean(env.GITHUB_TOKEN) &&
+    (type === 'image' || contentType.startsWith('image/')) &&
+    (await websiteHasGithubRepo(env, websiteId))
+
+  if (pushGithub) {
     try {
       const published = await publishMediaToGitHub(env, name, bytes, contentType, actorEmail)
       githubPath = published.path
@@ -877,7 +889,11 @@ async function replaceMedia(
     await env.MEDIA.put(`${mediaId}:meta`, JSON.stringify({ contentType, name: name || file.name }))
 
     publicUrl = mediaUrl(request, mediaId)
-    if (env.GITHUB_TOKEN && contentType.startsWith('image/')) {
+    const pushGithub =
+      Boolean(env.GITHUB_TOKEN) &&
+      contentType.startsWith('image/') &&
+      (await websiteHasGithubRepo(env, websiteId))
+    if (pushGithub) {
       try {
         const published = await publishMediaToGitHub(
           env,
