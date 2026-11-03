@@ -26,7 +26,7 @@
     }
   ],
   "vars": {
-    "CORS_ORIGINS": "https://dashboard.blacnova.net,https://www.blacnova.net,https://blacnova.net,https://jvwoodpallets.pages.dev",
+    "CORS_ORIGINS": "https://dashboard.blacnova.net,https://www.blacnova.net,https://blacnova.net,https://jvwoodpallets.pages.dev,https://jvwoodpallets.com,https://www.jvwoodpallets.com",
     "GITHUB_REPO": "nicholasxdavis/BlacnovaWebsite",
     "GITHUB_BRANCH": "main",
     "BREVO_SENDER_NAME": "Blacnova Development"

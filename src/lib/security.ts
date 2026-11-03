@@ -38,6 +38,8 @@ const ALLOWED_FORM_ORIGINS = [
   'https://www.blacnova.net',
   'https://blacnova.net',
   'https://jvwoodpallets.pages.dev',
+  'https://jvwoodpallets.com',
+  'https://www.jvwoodpallets.com',
   'http://localhost:5173',
   'http://127.0.0.1:5173',
   'http://localhost:8787',

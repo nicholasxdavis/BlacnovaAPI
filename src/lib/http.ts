@@ -5,6 +5,8 @@ const ALLOWED_DEFAULT = [
   'https://www.blacnova.net',
   'https://blacnova.net',
   'https://jvwoodpallets.pages.dev',
+  'https://jvwoodpallets.com',
+  'https://www.jvwoodpallets.com',
 ]
 
 export function corsHeaders(request: Request, env: Env): HeadersInit {
