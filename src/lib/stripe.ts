@@ -237,3 +237,19 @@ export async function voidStripeInvoice(env: Env, stripeInvoiceId: string): Prom
   }
   await stripeRequest(env, 'POST', `/invoices/${stripeInvoiceId}/void`)
 }
+
+/** Mark an open Stripe invoice paid outside Stripe (cash, Zelle, check, etc.). */
+export async function markStripeInvoicePaidOutOfBand(
+  env: Env,
+  stripeInvoiceId: string,
+): Promise<{ id: string; status: string }> {
+  const current = (await stripeGet(env, `/invoices/${stripeInvoiceId}`)) as {
+    id: string
+    status: string
+  }
+  if (current.status === 'paid') return current
+  const paid = (await stripeRequest(env, 'POST', `/invoices/${stripeInvoiceId}/pay`, {
+    paid_out_of_band: 'true',
+  })) as { id: string; status: string }
+  return paid
+}

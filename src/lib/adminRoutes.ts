@@ -2,13 +2,13 @@ import { hashPassword } from './auth'
 import { DEFAULT_CLIENT_MODULES, isFinanceOwner, isPlatformUser, requireFinanceOwner, withPortalModules } from './admin'
 import { intakeEmailContent, sendBrevoEmail, welcomeEmailContent } from './brevo'
 import { assertPasswordPolicy, generateTempPassword } from './config'
-import { createRetainerInvoice, loadWebsiteBilling, periodKey, restoreWebsiteBilling } from './billing'
+import { createRetainerInvoice, loadWebsiteBilling, markInvoicePaid, periodKey, restoreWebsiteBilling } from './billing'
 import { error, id, json, nowIso, today } from './http'
 import { createAndSendInvoice, deleteInvoiceRecord, listInvoices, summarizeInvoices } from './invoices'
 import { getBmcOverview, syncBmcFromApi } from './bmc'
 import { clampString, isValidEmail } from './security'
 import { revokeUserSessions } from './session'
-import { getBillingOverview } from './stripe'
+import { getBillingOverview, markStripeInvoicePaidOutOfBand } from './stripe'
 import type { Env, SessionUser } from './types'
 
 const WEBSITE_STATUSES = new Set(['live', 'maintenance', 'offline'])
@@ -580,6 +580,46 @@ export async function handleAdmin(
     return json({ ok: true })
   }
 
+  if (path.match(/^\/v1\/admin\/accounts\/[^/]+\/send-welcome$/) && method === 'POST') {
+    const accountId = path.split('/')[4]
+    const body = (await request.json().catch(() => ({}))) as { password?: string }
+    const row = await env.DB.prepare(
+      `SELECT u.id, u.email, u.name, u.website_id, w.name AS website_name, w.domain AS website_domain
+       FROM users u
+       JOIN websites w ON w.id = u.website_id
+       WHERE u.id = ?`,
+    )
+      .bind(accountId)
+      .first<{
+        id: string
+        email: string
+        name: string
+        website_id: string
+        website_name: string
+        website_domain: string
+      }>()
+    if (!row) return error('Account not found', 404)
+
+    const password = String(body.password || generateTempPassword())
+    const passwordError = assertPasswordPolicy(password)
+    if (passwordError) return error(passwordError)
+
+    const passwordHash = await hashPassword(password)
+    await env.DB.prepare(`UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?`)
+      .bind(passwordHash, nowIso(), accountId)
+      .run()
+    await revokeUserSessions(env, accountId)
+
+    const welcomeSent = await emailWelcome(env, {
+      name: row.name,
+      email: row.email,
+      password,
+      websiteName: row.website_name,
+      websiteDomain: row.website_domain,
+    })
+    return json({ ok: true, welcomeSent, email: row.email })
+  }
+
   if (path.startsWith('/v1/admin/accounts/') && method === 'PATCH') {
     const accountId = path.slice('/v1/admin/accounts/'.length)
     if (accountId.includes('/')) return error('Not found', 404)
@@ -733,6 +773,34 @@ export async function handleAdmin(
     } catch (err) {
       return error('Could not send invoice', 502)
     }
+  }
+
+  if (path.match(/^\/v1\/admin\/invoices\/[^/]+\/mark-paid$/) && method === 'POST') {
+    const invoiceId = path.split('/')[4]
+    const row = await env.DB.prepare(
+      `SELECT id, status, stripe_invoice_id FROM invoices WHERE id = ?`,
+    )
+      .bind(invoiceId)
+      .first<{ id: string; status: string; stripe_invoice_id: string | null }>()
+    if (!row) return error('Invoice not found', 404)
+
+    await markInvoicePaid(env, { localId: row.id })
+    let stripeStatus: string | null = null
+    if (row.stripe_invoice_id) {
+      try {
+        const paid = await markStripeInvoicePaidOutOfBand(env, row.stripe_invoice_id)
+        stripeStatus = paid.status
+      } catch (err) {
+        console.error(JSON.stringify({ err: 'stripe_mark_paid', detail: String(err) }))
+        return json({
+          ok: true,
+          localStatus: 'paid',
+          stripeStatus: null,
+          stripeError: err instanceof Error ? err.message : 'Stripe mark paid failed',
+        })
+      }
+    }
+    return json({ ok: true, localStatus: 'paid', stripeStatus })
   }
 
   if (path.startsWith('/v1/admin/invoices/') && method === 'DELETE') {

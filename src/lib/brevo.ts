@@ -327,11 +327,13 @@ export function welcomeEmailContent(opts: {
     '',
     `Your Blacnova client portal for ${opts.websiteName} (${opts.websiteDomain}) is ready.`,
     '',
+    'From the dashboard you can update website copy, replace product photos, review quote submissions, and check analytics.',
+    '',
     `Sign in: ${loginUrl}`,
     `Email: ${opts.email}`,
     `Temporary password: ${opts.password}`,
     '',
-    'Change this password after you sign in.',
+    'Sign in with these details, then open Settings and change the password to one only you know.',
     '',
     'Thank you,',
     'Blacnova Development',
@@ -340,19 +342,20 @@ export function welcomeEmailContent(opts: {
   const bodyHtml = `
     <p style="margin:0 0 16px;">Hi ${escapeHtml(opts.name)},</p>
     <p style="margin:0 0 16px;">Your client portal for <strong style="color:#000000;">${escapeHtml(opts.websiteName)}</strong> (${escapeHtml(opts.websiteDomain)}) is ready.</p>
+    <p style="margin:0 0 16px;">From the dashboard you can update website copy, replace product photos, review quote submissions, and check analytics.</p>
     <table role="presentation" class="bn-panel" width="100%" cellspacing="0" cellpadding="0" border="0" bgcolor="#f9fafb" style="margin:0 0 16px;background-color:#f9fafb;border:1px solid #e5e7eb;border-radius:8px;">
       <tr><td style="padding:12px 16px;border-bottom:1px solid #e5e7eb;"><div style="font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:#6b7280;">Sign in</div><div style="color:#1a1a1a;margin-top:4px;">${escapeHtml(loginUrl)}</div></td></tr>
       <tr><td style="padding:12px 16px;border-bottom:1px solid #e5e7eb;"><div style="font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:#6b7280;">Email</div><div style="color:#1a1a1a;margin-top:4px;">${escapeHtml(opts.email)}</div></td></tr>
       <tr><td style="padding:12px 16px;"><div style="font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:#6b7280;">Temporary password</div><div style="color:#1a1a1a;margin-top:4px;">${escapeHtml(opts.password)}</div></td></tr>
     </table>
-    <p style="margin:0;">Change this password after you sign in.</p>`
+    <p style="margin:0;">Sign in with these details, then open Settings and change the password to one only you know.</p>`
 
   const html = brandedEmailHtml({
     title: 'Your dashboard is ready',
     bodyHtml,
     ctaLabel: 'Open dashboard',
     ctaUrl: loginUrl,
-    footerNote: 'Blacnova Development — questions? Reply to this email.',
+    footerNote: 'Blacnova Development. Questions? Reply to this email.',
   })
 
   return { subject, html, text }
