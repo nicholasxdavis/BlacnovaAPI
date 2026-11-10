@@ -22,6 +22,7 @@ import {
   DUMMY_PASSWORD_HASH,
   supportEmail,
 } from './lib/config'
+import { mirrorMaintenanceJson } from './lib/maintenanceMirror'
 import {
   enforceNonpaymentSuspensions,
   getClientBillingSummary,
@@ -264,31 +265,17 @@ async function handle(request: Request, env: Env): Promise<Response> {
 
     if (!title || !message) return error('Title and message are required')
 
-    await env.DB.prepare(
-      `UPDATE maintenance SET enabled = ?, title = ?, message = ?, expected_return = ?, updated_at = ? WHERE website_id = ?`,
-    )
-      .bind(enabled ? 1 : 0, title, message, expectedReturn, nowIso(), websiteId)
-      .run()
+    const updatedAt = nowIso()
+    await env.DB.batch([
+      env.DB.prepare(
+        `UPDATE maintenance SET enabled = ?, title = ?, message = ?, expected_return = ?, updated_at = ? WHERE website_id = ?`,
+      ).bind(enabled ? 1 : 0, title, message, expectedReturn, updatedAt, websiteId),
+      env.DB.prepare(
+        `UPDATE websites SET status = CASE WHEN COALESCE(billing_suspended, 0) = 1 THEN 'offline' ELSE ? END, updated_at = ? WHERE id = ?`,
+      ).bind(enabled ? 'maintenance' : 'live', updatedAt, websiteId),
+    ])
 
-    await env.DB.prepare(`UPDATE websites SET status = ?, updated_at = ? WHERE id = ?`)
-      .bind(enabled ? 'maintenance' : 'live', nowIso(), websiteId)
-      .run()
-
-    // Mirror to GitHub so static Pages can also read a fallback flag
-    if (env.GITHUB_TOKEN) {
-      try {
-        const { mirrorMaintenanceJson } = await import('./lib/maintenanceMirror')
-        await mirrorMaintenanceJson(env, {
-          enabled,
-          title,
-          message,
-          expectedReturn,
-          reason: `dashboard ${user.email}`,
-        })
-      } catch (err) {
-        console.error('maintenance github mirror failed', String(err))
-      }
-    }
+    await mirrorMaintenanceJson(env, websiteId, 'dashboard')
 
     return json({
       maintenance: { enabled, title, message, expectedReturn },
@@ -463,6 +450,9 @@ async function handle(request: Request, env: Env): Promise<Response> {
     if (!env.GITHUB_TOKEN) {
       return error('GitHub publishing is not configured', 503)
     }
+    if (!(await getWebsite(env, websiteId))?.githubPublishEnabled) {
+      return error('GitHub publishing is unavailable for this website', 403)
+    }
     const result = await publishWebsiteContent(env, websiteId, user.email)
     return json({
       ok: true,
@@ -608,10 +598,10 @@ async function publicRoutes(request: Request, env: Env, path: string): Promise<R
         .bind(website.id)
         .all(),
       env.DB.prepare(
-        `SELECT id, name, type, url FROM media_items WHERE website_id = ? ORDER BY name COLLATE NOCASE`,
+        `SELECT id, name, type, url, content_type FROM media_items WHERE website_id = ? ORDER BY name COLLATE NOCASE`,
       )
         .bind(website.id)
-        .all<{ id: string; name: string; type: string; url: string | null }>(),
+        .all<{ id: string; name: string; type: string; url: string | null; content_type: string | null }>(),
     ])
     return json({
       website: {
@@ -645,6 +635,7 @@ async function publicRoutes(request: Request, env: Env, path: string): Promise<R
         name: m.name,
         type: m.type,
         url: m.url || null,
+        uploaded: Boolean(m.content_type),
       })),
     })
   }
@@ -847,13 +838,6 @@ async function serveMediaFile(env: Env, path: string): Promise<Response> {
   })
 }
 
-async function websiteHasGithubRepo(env: Env, websiteId: string): Promise<boolean> {
-  const row = await env.DB.prepare(`SELECT github_repo FROM websites WHERE id = ?`)
-    .bind(websiteId)
-    .first<{ github_repo: string | null }>()
-  return Boolean(row?.github_repo)
-}
-
 async function uploadMedia(request: Request, env: Env, websiteId: string, actorEmail: string): Promise<Response> {
   const form = await request.formData()
   const file = form.get('file')
@@ -877,7 +861,7 @@ async function uploadMedia(request: Request, env: Env, websiteId: string, actorE
   const pushGithub =
     Boolean(env.GITHUB_TOKEN) &&
     (type === 'image' || contentType.startsWith('image/')) &&
-    (await websiteHasGithubRepo(env, websiteId))
+    (await getWebsite(env, websiteId))?.githubPublishEnabled
 
   if (pushGithub) {
     try {
@@ -949,7 +933,7 @@ async function replaceMedia(
     const pushGithub =
       Boolean(env.GITHUB_TOKEN) &&
       contentType.startsWith('image/') &&
-      (await websiteHasGithubRepo(env, websiteId))
+      (await getWebsite(env, websiteId))?.githubPublishEnabled
     if (pushGithub) {
       try {
         const published = await publishMediaToGitHub(
@@ -959,7 +943,7 @@ async function replaceMedia(
           contentType,
           actorEmail,
         )
-        publicUrl = `https://www.blacnova.net/${published.path}`
+        publicUrl = `https://www.blacnova.net/${published.path}?v=${published.commitSha}`
       } catch (err) {
         console.error('github media replace failed', String(err))
       }

@@ -12,7 +12,6 @@ const CONTENT_PAGES: Array<{ path: string; label: string }> = [
   { path: 'index.html', label: 'Home' },
   { path: 'pages/about/index.html', label: 'About' },
   { path: 'pages/projects/index.html', label: 'Projects' },
-  { path: 'pages/tools/index.html', label: 'Tools' },
   { path: 'pages/legal/index.html', label: 'Legal' },
 ]
 

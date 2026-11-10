@@ -103,7 +103,7 @@ export async function putRepoBinary(
   const url = `${API}/repos/${repo(env)}/contents/${path.split('/').map(encodeURIComponent).join('/')}`
   const body: Record<string, unknown> = {
     message,
-    content: bufferToBase64(bytes),
+    content: bytesToBase64(new Uint8Array(bytes)),
     branch,
   }
   if (sha) body.sha = sha
@@ -122,7 +122,7 @@ export async function putRepoBinary(
 }
 
 function utf8ToBase64(str: string): string {
-  return bufferToBase64(new TextEncoder().encode(str).buffer)
+  return bytesToBase64(new TextEncoder().encode(str))
 }
 
 function base64ToUtf8(b64: string): string {
@@ -132,8 +132,7 @@ function base64ToUtf8(b64: string): string {
   return new TextDecoder().decode(bytes)
 }
 
-function bufferToBase64(buffer: ArrayBuffer): string {
-  const bytes = new Uint8Array(buffer)
+function bytesToBase64(bytes: Uint8Array): string {
   let binary = ''
   const chunk = 0x8000
   for (let i = 0; i < bytes.length; i += chunk) {

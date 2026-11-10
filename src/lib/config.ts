@@ -38,3 +38,10 @@ export function generateTempPassword(length = 14): string {
   for (const byte of bytes) out += alphabet[byte % alphabet.length]
   return out
 }
+export function isPrimaryWebsite(env: Env, domain: string, githubRepo: string | null): boolean {
+  const hostname = domain.trim().toLowerCase()
+  return (
+    (hostname === 'www.blacnova.net' || hostname === 'blacnova.net') &&
+    Boolean(env.GITHUB_REPO && githubRepo?.toLowerCase() === env.GITHUB_REPO.toLowerCase())
+  )
+}

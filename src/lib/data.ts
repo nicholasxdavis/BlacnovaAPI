@@ -1,6 +1,6 @@
 import { parseModules } from './session'
 import { isFinanceOwner, isPlatformUser, withPortalModules } from './admin'
-import { supportEmail } from './config'
+import { isPrimaryWebsite, supportEmail } from './config'
 import type { Env, SessionUser } from './types'
 
 export async function getWebsite(env: Env, websiteId: string) {
@@ -37,6 +37,7 @@ export async function getWebsite(env: Env, websiteId: string) {
     status: row.status as 'live' | 'maintenance' | 'offline',
     modules: withPortalModules(parseModules(row.modules)),
     githubRepo: row.github_repo,
+    githubPublishEnabled: Boolean(env.GITHUB_TOKEN) && isPrimaryWebsite(env, row.domain, row.github_repo),
     monthlyFeeCents: row.monthly_fee_cents,
     billingEmail: row.billing_email,
     billingName: row.billing_name,

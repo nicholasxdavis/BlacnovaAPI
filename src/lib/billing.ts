@@ -261,15 +261,7 @@ export async function suspendWebsiteForNonpayment(
     .bind(nowIso(), site.id)
     .run()
 
-  const primaryRepo = env.GITHUB_REPO || 'nicholasxdavis/BlacnovaWebsite'
-  if (!site.github_repo || site.github_repo === primaryRepo) {
-    await mirrorMaintenanceJson(env, {
-      enabled: true,
-      title,
-      message,
-      reason: `billing suspend ${site.domain}`,
-    })
-  }
+  await mirrorMaintenanceJson(env, site.id, 'billing suspension')
 
   await createNotification(env, {
     websiteId: site.id,
@@ -333,15 +325,7 @@ export async function restoreWebsiteBilling(
     ).bind(nowIso(), websiteId),
   ])
 
-  const primaryRepo = env.GITHUB_REPO || 'nicholasxdavis/BlacnovaWebsite'
-  if (!site.github_repo || site.github_repo === primaryRepo) {
-    await mirrorMaintenanceJson(env, {
-      enabled: false,
-      title: "We'll be right back",
-      message: `${site.name} is temporarily offline for improvements. Please check back soon.`,
-      reason: `billing restore ${site.domain}`,
-    })
-  }
+  await mirrorMaintenanceJson(env, site.id, 'billing restoration')
 
   await createNotification(env, {
     websiteId,
